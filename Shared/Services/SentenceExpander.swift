@@ -91,4 +91,44 @@ final class SentenceExpander {
         guard !words.isEmpty, words.count == tokens.count else { return }
         corrections.record(tokens: tokens, words: words)
     }
+
+    // MARK: - Live (1-letter prefix) mode used by the macOS app
+
+    struct LiveSuggestion: Equatable {
+        let sentences: [String]   // up to `count`, best first
+        let confidence: Double    // top sentence's confidence, 0..1
+        /// Tokens that were fed to the beam — one per character of buffer
+        /// for the 1-letter mode. The interceptor uses this length when
+        /// computing how many backspaces to send before inserting.
+        let tokens: [String]
+    }
+
+    /// 1-letter-prefix decoder. Each character of `buffer` is treated as a
+    /// single prefix token. Used by the macOS keystroke interceptor to
+    /// produce live suggestions as the user types — no period trigger, no
+    /// chunker DP, no `i`/`a` exception logic needed because every char is
+    /// already its own token. Returns up to `count` candidates (best first).
+    func liveSuggest(buffer: String, count: Int = 3) -> LiveSuggestion {
+        let normalized = buffer.lowercased()
+        guard normalized.count >= 2,
+              normalized.allSatisfy({ $0.isLetter }) else {
+            return LiveSuggestion(sentences: [], confidence: 0, tokens: [])
+        }
+        let tokens = normalized.map { String($0) }
+        let result = BeamSearch.decode(
+            tokens: tokens,
+            phrases: phrases,
+            corrections: corrections,
+            maxAlternatives: count + 4
+        )
+        if result.best.isEmpty {
+            return LiveSuggestion(sentences: [], confidence: 0, tokens: tokens)
+        }
+        var out: [String] = [result.best]
+        for alt in result.alternatives {
+            if out.count >= count { break }
+            if !out.contains(alt) { out.append(alt) }
+        }
+        return LiveSuggestion(sentences: out, confidence: result.confidence, tokens: tokens)
+    }
 }
