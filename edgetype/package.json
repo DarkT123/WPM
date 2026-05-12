@@ -1,0 +1,16 @@
+{
+  "name": "edgetype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EdgeType — first/last-letter predictive keyboard prototype",
+  "workspaces": ["backend", "frontend"],
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,magenta \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "test": "npm test -w backend",
+    "start": "npm run start -w backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

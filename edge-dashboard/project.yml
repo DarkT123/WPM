@@ -1,0 +1,35 @@
+name: EdgeDashboard
+
+options:
+  bundleIdPrefix: com.yourname.edge
+  deploymentTarget:
+    macOS: "13.0"
+  defaultConfig: Debug
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+targets:
+
+  # ─── macOS Dashboard App ─────────────────────────────────────────
+  EdgeDashboard:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+
+    sources:
+      - path: EdgeDashboard
+        excludes:
+          - "**/*.entitlements"
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourname.edge.dashboard
+        INFOPLIST_FILE: EdgeDashboard/Info.plist
+        CODE_SIGN_ENTITLEMENTS: EdgeDashboard/EdgeDashboard.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic

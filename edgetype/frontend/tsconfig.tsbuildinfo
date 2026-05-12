@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/components/candidatepanel.tsx","./src/components/compressedinput.tsx","./src/components/keyboardui.tsx","./src/components/latencybadge.tsx","./src/components/modetoggles.tsx","./src/components/prediction.tsx","./src/components/wordcandidates.tsx","../shared/types.ts"],"version":"5.9.3"}
