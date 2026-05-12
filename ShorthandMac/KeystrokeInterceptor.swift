@@ -35,9 +35,21 @@ final class KeystrokeInterceptor {
     /// Letters typed since the last word boundary (lowercased). Mutated
     /// only on the event-tap runloop thread (main).
     private var buffer: String = ""
-    /// Latest live suggestion produced by the decoder. Kept around so a
-    /// later "." press can auto-apply #1 without re-decoding.
+    /// Latest live suggestion produced by the local decoder. Kept around
+    /// so a later "." press can auto-apply #1 without re-decoding.
     private var latest: SentenceExpander.LiveSuggestion = .init(sentences: [], confidence: 0, tokens: [])
+    /// `1` or `2` — controls which liveSuggest mode the interceptor asks
+    /// the expander for. AppState writes this whenever the setting changes.
+    var prefixLength: Int = 2
+    /// When non-empty, period auto-apply prefers these sentences over the
+    /// interceptor's local-decoder `latest`. AppState writes it to the AI
+    /// candidates once they arrive, so a "." after AI-replaced rows
+    /// applies the AI's top guess.
+    var overrideSuggestions: [String] = []
+    /// When true, the interceptor refuses to auto-apply local-only
+    /// suggestions on "." (AI must have produced an override first).
+    /// AppState sets this when the user has MiniMax configured.
+    var aiOnly: Bool = false
 
     /// (buffer, suggestions). Posted on the main queue. The UI uses this
     /// both to show the panel and to refresh its row content.
@@ -94,13 +106,13 @@ final class KeystrokeInterceptor {
 
     // MARK: - Public — called from the suggestion panel
 
-    /// Apply the suggestion at index `pickedIndex` from the latest live
-    /// suggestion list. Replaces the typed shorthand letters with the
-    /// expanded sentence. `withTrailingPeriod=true` appends "." (used by
-    /// the period auto-apply path).
+    /// Apply the suggestion at index `pickedIndex`. Prefers
+    /// `overrideSuggestions` (set by AppState when AI has reranked)
+    /// over the interceptor's own local-decoder result.
     func applySuggestion(pickedIndex idx: Int, withTrailingPeriod: Bool) {
-        guard idx >= 0, idx < latest.sentences.count else { return }
-        let sentence = latest.sentences[idx]
+        let pool = overrideSuggestions.isEmpty ? latest.sentences : overrideSuggestions
+        guard idx >= 0, idx < pool.count else { return }
+        let sentence = pool[idx]
         let bufferLen = buffer.count
         let text = withTrailingPeriod ? sentence + "." : sentence
         let original = buffer
@@ -164,9 +176,18 @@ final class KeystrokeInterceptor {
         }
         let s = String(utf16CodeUnits: chars, count: length)
 
-        // The "." trigger: auto-apply suggestion #1 if available.
+        // The "." trigger.
+        //   - When AI is configured (aiOnly): only auto-apply if AI has
+        //     produced an override list for the current buffer.
+        //   - When AI isn't configured: fall back to the local pool.
         if s == "." {
-            if !latest.sentences.isEmpty, buffer.count >= 2 {
+            let pool: [String]
+            if aiOnly {
+                pool = overrideSuggestions
+            } else {
+                pool = overrideSuggestions.isEmpty ? latest.sentences : overrideSuggestions
+            }
+            if !pool.isEmpty, buffer.count >= 2 {
                 applySuggestion(pickedIndex: 0, withTrailingPeriod: true)
                 return nil   // consume the "."
             }
@@ -200,7 +221,7 @@ final class KeystrokeInterceptor {
     }
 
     private func refreshSuggestions() {
-        latest = expander.liveSuggest(buffer: buffer, count: 3)
+        latest = expander.liveSuggest(buffer: buffer, prefixLength: prefixLength, count: 3)
         let buf = buffer
         let s = latest.sentences
         DispatchQueue.main.async { [weak self] in

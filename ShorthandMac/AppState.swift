@@ -17,6 +17,13 @@ final class AppState: ObservableObject {
     @Published var aiEnabled: Bool                      // true when MINIMAX_API_KEY is present
     @Published var aiInFlight: Bool = false             // for the UI's "thinking…" indicator
     @Published var styleNotes: String = ""              // appended to AI system prompt
+    /// `1` = type one letter per word (very ambiguous, faster typing).
+    /// `2` = type two letters per word (~5× less ambiguous, default).
+    @Published var prefixLength: Int = 2 {
+        didSet {
+            interceptor.prefixLength = prefixLength
+        }
+    }
 
     // MARK: - Dependencies
 
@@ -40,9 +47,13 @@ final class AppState: ObservableObject {
         let corrections = CorrectionMemory(storeURL: storeURL, phrases: phrases)
         let expander = SentenceExpander(phrases: phrases, corrections: corrections)
         self.interceptor = KeystrokeInterceptor(expander: expander)
+        self.interceptor.prefixLength = 2
         self.panel = SuggestionPanel()
         self.ai = MiniMaxClient.makeDefault()
         self.aiEnabled = (ai != nil)
+        // When AI is configured, the panel + period auto-apply both wait
+        // for AI to produce candidates. Local results never reach the UI.
+        self.interceptor.aiOnly = (ai != nil)
 
         interceptor.didUpdate = { [weak self] buffer, suggestions in
             Task { @MainActor [weak self] in
@@ -119,19 +130,30 @@ final class AppState: ObservableObject {
 
         if localSuggestions.isEmpty {
             self.suggestions = []
+            interceptor.overrideSuggestions = []
             panel.hide()
             aiInFlight = false
             return
         }
 
-        // Show local suggestions immediately — never block on AI.
-        self.suggestions = localSuggestions
-        let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 120)
-        panel.show(at: topLeft, suggestions: localSuggestions) { [weak self] idx in
-            Task { @MainActor in self?.pick(idx) }
+        // When AI is NOT configured, local is all we have — show it.
+        // When AI IS configured, hide the panel and wait for AI; we don't
+        // want local-dilution junk in front of the user.
+        if ai == nil {
+            self.suggestions = localSuggestions
+            interceptor.overrideSuggestions = []
+            let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 120)
+            panel.show(at: topLeft, suggestions: localSuggestions) { [weak self] idx in
+                Task { @MainActor in self?.pick(idx) }
+            }
+            return
         }
+        // AI is configured — keep the panel empty until AI rerank arrives.
+        self.suggestions = []
+        interceptor.overrideSuggestions = []
+        panel.hide()
 
-        // Kick off a debounced AI rerank when configured.
+        // Kick off a debounced AI rerank.
         guard let ai else { return }
         let myGeneration = aiGeneration
         let context = CaretLocator.contextAroundCaret()
@@ -165,6 +187,7 @@ final class AppState: ObservableObject {
                 self.aiInFlight = false
                 guard let resp, !resp.candidates.isEmpty else { return }
                 self.suggestions = resp.candidates
+                self.interceptor.overrideSuggestions = resp.candidates
                 let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 120)
                 self.panel.show(at: topLeft, suggestions: resp.candidates) { [weak self] idx in
                     Task { @MainActor in self?.pick(idx) }

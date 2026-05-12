@@ -103,32 +103,69 @@ final class SentenceExpander {
         let tokens: [String]
     }
 
-    /// 1-letter-prefix decoder. Each character of `buffer` is treated as a
-    /// single prefix token. Used by the macOS keystroke interceptor to
-    /// produce live suggestions as the user types — no period trigger, no
-    /// chunker DP, no `i`/`a` exception logic needed because every char is
-    /// already its own token. Returns up to `count` candidates (best first).
-    func liveSuggest(buffer: String, count: Int = 3) -> LiveSuggestion {
+    /// Live decoder used by the macOS keystroke interceptor.
+    ///
+    /// `prefixLength`:
+    ///   - `1`: every character of the buffer is its own prefix token.
+    ///     Quick to type, very ambiguous.
+    ///   - `2`: buffer is segmented into 2-letter chunks via the shorthand
+    ///     chunker (which also handles `i`/`a` as 1-letter exceptions).
+    ///     If the buffer's length isn't compatible with a clean 2-letter
+    ///     segmentation, we automatically retry with the last typed char
+    ///     dropped so suggestions don't disappear mid-chunk.
+    ///
+    /// Returns up to `count` candidates ranked by beam-search score.
+    func liveSuggest(buffer: String, prefixLength: Int = 2, count: Int = 3) -> LiveSuggestion {
         let normalized = buffer.lowercased()
         guard normalized.count >= 2,
               normalized.allSatisfy({ $0.isLetter }) else {
             return LiveSuggestion(sentences: [], confidence: 0, tokens: [])
         }
-        let tokens = normalized.map { String($0) }
-        let result = BeamSearch.decode(
-            tokens: tokens,
-            phrases: phrases,
-            corrections: corrections,
-            maxAlternatives: count + 4
-        )
-        if result.best.isEmpty {
-            return LiveSuggestion(sentences: [], confidence: 0, tokens: tokens)
+
+        // Attempt 1: full buffer.
+        if let result = decodeOnce(buffer: normalized, prefixLength: prefixLength, count: count) {
+            return result
         }
-        var out: [String] = [result.best]
-        for alt in result.alternatives {
+        // Attempt 2 (2-letter only): drop the most recent char — handles
+        // the "user is mid-chunk" case so the panel doesn't blink.
+        if prefixLength == 2, normalized.count >= 3 {
+            let truncated = String(normalized.dropLast())
+            if let result = decodeOnce(buffer: truncated, prefixLength: prefixLength, count: count) {
+                return result
+            }
+        }
+        return LiveSuggestion(sentences: [], confidence: 0, tokens: [])
+    }
+
+    private func decodeOnce(buffer: String, prefixLength: Int, count: Int) -> LiveSuggestion? {
+        let segmentations: [[String]]
+        if prefixLength == 1 {
+            segmentations = [buffer.map { String($0) }]
+        } else {
+            segmentations = ShorthandChunker.segmentations(buffer)
+        }
+        if segmentations.isEmpty { return nil }
+
+        var best: BeamResult?
+        var bestTokens: [String] = []
+        for seg in segmentations {
+            let r = BeamSearch.decode(
+                tokens: seg,
+                phrases: phrases,
+                corrections: corrections,
+                maxAlternatives: count + 4
+            )
+            if best == nil || r.score > best!.score {
+                best = r
+                bestTokens = seg
+            }
+        }
+        guard let r = best, !r.best.isEmpty else { return nil }
+        var out: [String] = [r.best]
+        for alt in r.alternatives {
             if out.count >= count { break }
             if !out.contains(alt) { out.append(alt) }
         }
-        return LiveSuggestion(sentences: out, confidence: result.confidence, tokens: tokens)
+        return LiveSuggestion(sentences: out, confidence: r.confidence, tokens: bestTokens)
     }
 }

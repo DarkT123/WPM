@@ -9,6 +9,7 @@ struct ContentView: View {
                 header
                 toggleCard
                 accessibilityCard
+                encodingCard
                 aiCard
                 styleNotesCard
                 bufferCard
@@ -84,6 +85,32 @@ struct ContentView: View {
                 Button("Re-check") { state.refreshAccessibility() }
                     .controlSize(.small)
             }
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var encodingCard: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "keyboard.badge.ellipsis")
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 36)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Shorthand encoding")
+                    .font(.subheadline.weight(.semibold))
+                Text("How many letters you type per word. 2-letter is ~5× more accurate; 1-letter is fewer keystrokes but very ambiguous.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Picker("", selection: $state.prefixLength) {
+                    Text("1-letter (tdrh)").tag(1)
+                    Text("2-letter (thdoraho)").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            Spacer(minLength: 0)
         }
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -173,10 +200,14 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Try these in any app")
                 .font(.subheadline.weight(.semibold))
-            ExampleRow(input: "tdrh.", output: "the dog ran home.")
-            ExampleRow(input: "iwtm.", output: "i want to make.")
-            ExampleRow(input: "iwtmapmr.", output: "i want to make a prediction market research.")
-            Text("As you type, the floating panel shows 3 candidates. Click 1, 2, or 3 to pick — or hit “.” to take #1 + a period.")
+            if state.prefixLength == 2 {
+                ExampleRow(input: "thdoraho.", output: "the dog ran home.")
+                ExampleRow(input: "iwatoma.", output: "i want to make.")
+            } else {
+                ExampleRow(input: "tdrh.", output: "the dog ran home.")
+                ExampleRow(input: "iwtm.", output: "i want to make.")
+            }
+            Text("As you type, the floating panel shows 3 AI candidates. Click 1, 2, or 3 to pick — or hit “.” to auto-apply #1 + a period.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)

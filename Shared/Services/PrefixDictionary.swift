@@ -72,12 +72,37 @@ enum PrefixDictionary {
     /// Prefix → entries (already sorted by descending frequency).
     private static let index: [String: [WordEntry]] = build()
 
+    /// Synthetic frequency assigned to words found only in
+    /// /usr/share/dict/words (no real corpus frequency available). Below
+    /// the obscurity threshold so they get penalised vs. real common
+    /// words, but above zero so they're reachable.
+    private static let systemDictFreq = 50
+
     private static func build() -> [String: [WordEntry]] {
         var dedup: [String: Int] = [:]
+
+        // Tier 1: the curated baseline (kept for project-specific words
+        // like "prediction market research app" that the AI examples lean
+        // on heavily).
         for (w, f) in starter {
             let k = w.lowercased()
             dedup[k] = max(dedup[k] ?? 0, f)
         }
+        // Tier 2: top-10k from Norvig's Google n-gram dump. This is the
+        // bulk of real common-English vocabulary with accurate ranking.
+        for (w, f) in NorvigTop10k.entries {
+            let k = w.lowercased()
+            dedup[k] = max(dedup[k] ?? 0, f)
+        }
+        // Tier 3: /usr/share/dict/words on macOS — ~235k entries, no
+        // frequency info. Anything still missing gets a synthetic low
+        // freq so it's reachable but ranks below corpus-known words.
+        for w in loadSystemWordList() {
+            if dedup[w] == nil {
+                dedup[w] = systemDictFreq
+            }
+        }
+
         let entries = dedup
             .map { WordEntry(word: $0.key, freq: $0.value) }
             .sorted { $0.freq > $1.freq }
@@ -94,6 +119,26 @@ enum PrefixDictionary {
             }
         }
         return byPrefix
+    }
+
+    private static func loadSystemWordList() -> [String] {
+        let path = "/usr/share/dict/words"
+        guard let data = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return []
+        }
+        var out: [String] = []
+        out.reserveCapacity(250_000)
+        for line in data.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces).lowercased()
+            // Pure lowercase alphabetic only, length 2..20 — skips proper
+            // nouns, abbreviations, and oddities (the system list has a
+            // surprising amount of weirdness).
+            if trimmed.count >= 2, trimmed.count <= 20,
+               trimmed.allSatisfy({ $0.isLetter && $0.isASCII }) {
+                out.append(trimmed)
+            }
+        }
+        return out
     }
 
     /// Flat frequency lookup (1 if unknown — never 0 so log(freq+1) doesn't trap).
