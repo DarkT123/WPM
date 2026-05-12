@@ -1,11 +1,16 @@
 import Foundation
 
 struct AIRerankRequest {
-    /// One-letter-prefix tokens the user has typed so far, lowercased.
+    /// Prefix tokens the user has typed so far, lowercased. With
+    /// `prefixLength == 1` each token is one letter; with `prefixLength == 2`
+    /// each token is 1–2 letters (`i`/`a` may be 1 letter; the rest 2).
     let tokens: [String]
+    /// `1` or `2` — describes the encoding scheme so the AI can interpret
+    /// the tokens correctly.
+    let prefixLength: Int
     /// The current local-decoder top-3 (best first).
     let localCandidates: [String]
-    /// Text immediately preceding the cursor in the host app (up to ~120 chars).
+    /// Text immediately preceding the cursor in the host app (up to ~500 chars).
     let contextBefore: String
     /// Text immediately following the cursor (rarely useful but cheap to include).
     let contextAfter: String
@@ -36,7 +41,7 @@ final class MiniMaxClient {
             let base = EnvLoader.value(for: "MINIMAX_API_BASE_URL") ?? "https://api.minimax.chat"
             guard let url = URL(string: base) else { return nil }
             let model = EnvLoader.value(for: "MINIMAX_MODEL") ?? "abab6.5-chat"
-            let timeoutMs = Int(EnvLoader.value(for: "MINIMAX_TIMEOUT_MS") ?? "") ?? 500
+            let timeoutMs = Int(EnvLoader.value(for: "MINIMAX_TIMEOUT_MS") ?? "") ?? 1500
             return Config(baseURL: url, apiKey: key, model: model, timeout: TimeInterval(timeoutMs) / 1000)
         }
     }
@@ -75,7 +80,7 @@ final class MiniMaxClient {
             "temperature": 0.2,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": Self.systemPrompt(styleNotes: req.styleNotes)],
+                ["role": "system", "content": Self.systemPrompt(styleNotes: req.styleNotes, prefixLength: req.prefixLength)],
                 ["role": "user", "content": Self.userPrompt(req: req)],
             ],
         ]
@@ -97,13 +102,21 @@ final class MiniMaxClient {
 
     // MARK: - Prompt construction
 
-    private static func systemPrompt(styleNotes: String) -> String {
+    private static func systemPrompt(styleNotes: String, prefixLength: Int) -> String {
+        let encodingRule: String
+        if prefixLength == 1 {
+            encodingRule = "Each shorthand token is the FIRST LETTER of one intended word. The output has exactly the same number of words as tokens, and each output word starts with the corresponding letter (case-insensitive)."
+        } else {
+            encodingRule = "Each shorthand token is the FIRST ONE OR TWO LETTERS of one intended word. Single-letter tokens are limited to 'i' or 'a' (English single-letter words); every other token is a two-letter prefix. The output has exactly the same number of words as tokens, and each output word starts with the corresponding prefix (case-insensitive)."
+        }
         let base = """
-        You expand shorthand into full English sentences.
+        You expand a user's shorthand into full, grammatically correct English sentences.
 
-        Each shorthand token is the first letter of one intended word. The output sentence has exactly the same number of words as there are tokens, and each output word starts with the corresponding letter (case-insensitive). Use the surrounding text context to choose the right words.
+        \(encodingRule)
 
-        Apply natural English capitalization (sentence start, proper nouns) and punctuation. Do NOT add a trailing period — the caller appends one if needed.
+        Use the surrounding text context to disambiguate. Apply natural English capitalization (sentence start, proper nouns) and punctuation INSIDE the sentence, but do NOT add a trailing period — the caller appends one if needed.
+
+        Produce only sentences a fluent English speaker would actually write. Discard candidates that are grammatical noise.
 
         Return ONLY JSON of the form:
         {"candidates": ["best sentence", "second", "third"]}

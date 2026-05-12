@@ -156,21 +156,26 @@ final class AppState: ObservableObject {
         // Kick off a debounced AI rerank.
         guard let ai else { return }
         let myGeneration = aiGeneration
-        let context = CaretLocator.contextAroundCaret()
+        let context = CaretLocator.contextAroundCaret(maxChars: 500)
         let tokens = buffer.map { String($0).lowercased() }
         let corrections = self.recentCorrections
         let notes = self.styleNotes
+        let capturedPrefixLength = self.prefixLength
         aiInFlight = true
 
         debounceTask = Task { [weak self] in
-            // 250ms pause-detection. If a new keystroke arrives, this Task
-            // gets cancelled by `aiGeneration &+= 1` + `debounceTask?.cancel()`.
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            // 100ms pause-detection. Shorter than before so AI fires more
+            // promptly. If a new keystroke arrives, this Task is cancelled
+            // via `aiGeneration &+= 1` + `debounceTask?.cancel()`.
+            try? await Task.sleep(nanoseconds: 100_000_000)
             if Task.isCancelled { return }
 
             let req = AIRerankRequest(
                 tokens: tokens,
-                localCandidates: localSuggestions,
+                prefixLength: capturedPrefixLength,
+                // Don't pass local guesses anymore — they were biasing the
+                // model toward weaker candidates. AI generates fresh.
+                localCandidates: [],
                 contextBefore: context.before,
                 contextAfter: context.after,
                 recentCorrections: corrections,
