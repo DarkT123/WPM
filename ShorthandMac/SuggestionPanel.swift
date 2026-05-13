@@ -1,22 +1,24 @@
 import AppKit
 import SwiftUI
 
-/// Borderless, non-activating floating panel that hovers next to the user's
-/// caret. Doesn't steal focus from whatever app they're typing in. SwiftUI
-/// `Button`s inside still receive clicks and fire their actions.
+/// Borderless, non-activating floating panel that hovers next to the
+/// user's caret. Doesn't steal focus from whatever app they're typing in.
+///
+/// Two states:
+///   • `.expanding(compressed)` — shown while AI is in flight.
+///   • `.expanded(picked, alternatives, ...)` — after a successful
+///     expansion. The user can click an alternative to swap, or Undo
+///     to revert to the original compressed token + period.
 @MainActor
 final class SuggestionPanel {
 
     private let panel: NSPanel
-    private let host: NSHostingController<SuggestionsRoot>
-
-    /// Last-snapshotted list. Updated by `show(at:suggestions:onPick:)`.
-    private(set) var currentSuggestions: [String] = []
+    private let host: NSHostingController<PanelRoot>
 
     init() {
-        let initial = SuggestionsRoot(suggestions: [], onPick: { _ in })
+        let initial = PanelRoot(state: .idle)
         let host = NSHostingController(rootView: initial)
-        host.view.frame = NSRect(x: 0, y: 0, width: 360, height: 120)
+        host.view.frame = NSRect(x: 0, y: 0, width: 380, height: 60)
         self.host = host
 
         let panel = NSPanel(
@@ -38,16 +40,48 @@ final class SuggestionPanel {
         self.panel = panel
     }
 
-    func show(at topLeft: NSPoint, suggestions: [String], onPick: @escaping (Int) -> Void) {
-        currentSuggestions = suggestions
-        host.rootView = SuggestionsRoot(suggestions: suggestions, onPick: onPick)
-        // Re-size to fit content (3 rows + chrome).
-        let h: CGFloat = CGFloat(min(3, suggestions.count)) * 30 + 16
-        let size = NSSize(width: 360, height: h)
+    func showExpanding(at topLeft: NSPoint, compressed: String) {
+        host.rootView = PanelRoot(state: .expanding(compressed: compressed))
+        let h: CGFloat = 44
+        let size = NSSize(width: 380, height: h)
         panel.setContentSize(size)
         panel.setFrameTopLeftPoint(topLeft)
         panel.orderFrontRegardless()
-        // Fade in if it was hidden.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    func showExpanded(at topLeft: NSPoint,
+                      picked: String,
+                      alternatives: [String],
+                      onSwap: @escaping (String) -> Void,
+                      onUndo: @escaping () -> Void) {
+        host.rootView = PanelRoot(state: .expanded(
+            picked: picked,
+            alternatives: Array(alternatives.prefix(3)),
+            onSwap: onSwap,
+            onUndo: onUndo
+        ))
+        let rowCount = min(3, alternatives.count)
+        let h: CGFloat = CGFloat(rowCount) * 28 + 76
+        let size = NSSize(width: 380, height: h)
+        panel.setContentSize(size)
+        panel.setFrameTopLeftPoint(topLeft)
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    func showError(at topLeft: NSPoint, message: String) {
+        host.rootView = PanelRoot(state: .error(message: message))
+        let size = NSSize(width: 380, height: 56)
+        panel.setContentSize(size)
+        panel.setFrameTopLeftPoint(topLeft)
+        panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.08
             panel.animator().alphaValue = 1
@@ -55,7 +89,6 @@ final class SuggestionPanel {
     }
 
     func hide() {
-        currentSuggestions = []
         panel.orderOut(nil)
         panel.alphaValue = 0
     }
@@ -63,16 +96,30 @@ final class SuggestionPanel {
 
 // MARK: - SwiftUI content
 
-private struct SuggestionsRoot: View {
-    let suggestions: [String]
-    let onPick: (Int) -> Void
+private enum PanelState {
+    case idle
+    case expanding(compressed: String)
+    case expanded(picked: String,
+                  alternatives: [String],
+                  onSwap: (String) -> Void,
+                  onUndo: () -> Void)
+    case error(message: String)
+}
+
+private struct PanelRoot: View {
+    let state: PanelState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(suggestions.prefix(3).enumerated()), id: \.offset) { idx, sentence in
-                SuggestionRow(index: idx + 1, sentence: sentence) {
-                    onPick(idx)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            switch state {
+            case .idle:
+                EmptyView()
+            case .expanding(let compressed):
+                ExpandingView(compressed: compressed)
+            case .expanded(let picked, let alts, let onSwap, let onUndo):
+                ExpandedView(picked: picked, alternatives: alts, onSwap: onSwap, onUndo: onUndo)
+            case .error(let message):
+                ErrorView(message: message)
             }
         }
         .padding(8)
@@ -84,11 +131,68 @@ private struct SuggestionsRoot: View {
     }
 }
 
-private struct SuggestionRow: View {
+private struct ExpandingView: View {
+    let compressed: String
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small).scaleEffect(0.7)
+            Text("Expanding")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(compressed)
+                .font(.system(.callout, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
+    }
+}
+
+private struct ExpandedView: View {
+    let picked: String
+    let alternatives: [String]
+    let onSwap: (String) -> Void
+    let onUndo: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "wand.and.stars")
+                    .foregroundStyle(.green)
+                    .font(.caption)
+                Text(picked)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Button(action: onUndo) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.uturn.backward")
+                        Text("Undo")
+                    }
+                    .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+            if !alternatives.isEmpty {
+                Divider().padding(.vertical, 2)
+                ForEach(Array(alternatives.prefix(3).enumerated()), id: \.offset) { idx, alt in
+                    AlternativeRow(index: idx + 1, sentence: alt) {
+                        onSwap(alt)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct AlternativeRow: View {
     let index: Int
     let sentence: String
     let action: () -> Void
-
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -109,5 +213,22 @@ private struct SuggestionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct ErrorView: View {
+    let message: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.caption)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
     }
 }

@@ -1,32 +1,61 @@
 import Foundation
 
-struct AIRerankRequest {
-    /// Prefix tokens the user has typed so far, lowercased. With
-    /// `prefixLength == 1` each token is one letter; with `prefixLength == 2`
-    /// each token is 1–2 letters (`i`/`a` may be 1 letter; the rest 2).
-    let tokens: [String]
-    /// `1` or `2` — describes the encoding scheme so the AI can interpret
-    /// the tokens correctly.
-    let prefixLength: Int
-    /// The current local-decoder top-3 (best first).
-    let localCandidates: [String]
+struct ExpansionRequest {
+    /// The compressed no-space token the user just typed (lowercased).
+    /// Could be one letter per word ("tdrh"), partial words ("iwgotosch"),
+    /// or full words mashed together ("thedogranhome").
+    let compressedInput: String
     /// Text immediately preceding the cursor in the host app (up to ~500 chars).
     let contextBefore: String
-    /// Text immediately following the cursor (rarely useful but cheap to include).
+    /// Text immediately following the cursor.
     let contextAfter: String
-    /// Recent (shorthand → final) corrections — used as few-shot examples.
-    let recentCorrections: [(shorthand: String, final: String)]
+    /// Recent (compressed → final) corrections — used as few-shot examples.
+    let recentCorrections: [(compressed: String, final: String)]
     /// User-supplied free-text style notes, appended to the system prompt.
     let styleNotes: String
 }
 
-struct AIRerankResponse: Equatable {
-    let candidates: [String]   // best first, up to 3
+struct ExpansionResponse: Equatable {
+    /// False if the AI judges this is not actually shorthand (e.g. the
+    /// user typed a real word like "hello" and pressed period). Caller
+    /// should leave the typed text alone in that case.
+    let shouldExpand: Bool
+    /// Best-guess full sentence. Empty when shouldExpand is false.
+    let expanded: String
+    /// Up to ~3 alternative sentences for the user to swap to.
+    let alternatives: [String]
+    /// Self-reported confidence, 0–1. Used by the UI to decide whether to
+    /// auto-hide the alternatives panel quickly or leave it lingering.
+    let confidence: Double
 }
 
-/// MiniMax adapter. Speaks the same OpenAI-compatible chat-completions
-/// endpoint as the Edge backend version. Designed to fail open: any error
-/// returns nil so the caller keeps showing local suggestions.
+enum ExpansionError: Error, Equatable {
+    case http(Int, String)
+    case timeout
+    case network(String)
+    case parse(String)
+    case noKey
+
+    var displayMessage: String {
+        switch self {
+        case .http(let code, let msg):
+            return "HTTP \(code): \(msg.prefix(120))"
+        case .timeout:
+            return "request timed out"
+        case .network(let m):
+            return "network: \(m.prefix(120))"
+        case .parse(let m):
+            return "couldn't parse response: \(m.prefix(120))"
+        case .noKey:
+            return "no API key configured"
+        }
+    }
+}
+
+/// Adapter for OpenAI-compatible chat-completions endpoints (MiniMax,
+/// xAI, Groq, DeepSeek, OpenAI). Designed to fail open: a typed error
+/// is returned so the caller can either inform the user or cancel the
+/// expansion (re-inserting the user's original period).
 final class MiniMaxClient {
 
     struct Config {
@@ -41,7 +70,7 @@ final class MiniMaxClient {
             let base = EnvLoader.value(for: "MINIMAX_API_BASE_URL") ?? "https://api.minimax.chat"
             guard let url = URL(string: base) else { return nil }
             let model = EnvLoader.value(for: "MINIMAX_MODEL") ?? "abab6.5-chat"
-            let timeoutMs = Int(EnvLoader.value(for: "MINIMAX_TIMEOUT_MS") ?? "") ?? 1500
+            let timeoutMs = Int(EnvLoader.value(for: "MINIMAX_TIMEOUT_MS") ?? "") ?? 30000
             return Config(baseURL: url, apiKey: key, model: model, timeout: TimeInterval(timeoutMs) / 1000)
         }
     }
@@ -59,16 +88,12 @@ final class MiniMaxClient {
         self.session = URLSession(configuration: cfg)
     }
 
-    /// Build a config from the user's `.env` file. Returns nil if no key
-    /// is present (caller treats this as "AI disabled, local only").
     static func makeDefault() -> MiniMaxClient? {
         guard let cfg = Config.fromEnv() else { return nil }
         return MiniMaxClient(config: cfg)
     }
 
-    /// Hits the chat-completions endpoint. Returns nil on timeout, network
-    /// error, non-2xx, or unparseable response.
-    func rerank(_ req: AIRerankRequest) async -> AIRerankResponse? {
+    func expand(_ req: ExpansionRequest) async -> Result<ExpansionResponse, ExpansionError> {
         let url = config.baseURL.appendingPathComponent("/v1/chat/completions")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -77,60 +102,118 @@ final class MiniMaxClient {
 
         let body: [String: Any] = [
             "model": config.model,
-            "temperature": 0.2,
-            "response_format": ["type": "json_object"],
+            "temperature": 0,
+            "max_tokens": 3000,
             "messages": [
-                ["role": "system", "content": Self.systemPrompt(styleNotes: req.styleNotes, prefixLength: req.prefixLength)],
+                ["role": "system", "content": Self.systemPrompt(styleNotes: req.styleNotes)],
                 ["role": "user", "content": Self.userPrompt(req: req)],
             ],
         ]
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
-            return nil
+            return .failure(.parse("encoding request body"))
         }
         request.httpBody = payload
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                return nil
+            guard let http = response as? HTTPURLResponse else {
+                return .failure(.network("no HTTP response"))
             }
-            return Self.parse(data)
+            if http.statusCode != 200 {
+                let msg = Self.extractServerMessage(data) ?? String(data: data, encoding: .utf8) ?? ""
+                return .failure(.http(http.statusCode, msg))
+            }
+            if let parsed = Self.parse(data) {
+                return .success(parsed)
+            }
+            return .failure(.parse("no expansion in response (model may have hit max_tokens during reasoning)"))
+        } catch let err as URLError {
+            if err.code == .timedOut { return .failure(.timeout) }
+            if err.code == .cancelled { return .failure(.network("cancelled")) }
+            return .failure(.network(err.localizedDescription))
         } catch {
-            return nil
+            return .failure(.network(error.localizedDescription))
         }
+    }
+
+    private static func extractServerMessage(_ data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let err = obj["error"] as? [String: Any], let m = err["message"] as? String { return m }
+        if let m = obj["message"] as? String { return m }
+        return nil
     }
 
     // MARK: - Prompt construction
 
-    private static func systemPrompt(styleNotes: String, prefixLength: Int) -> String {
-        let encodingRule: String
-        if prefixLength == 1 {
-            encodingRule = "Each shorthand token is the FIRST LETTER of one intended word. The output has exactly the same number of words as tokens, and each output word starts with the corresponding letter (case-insensitive)."
-        } else {
-            encodingRule = "Each shorthand token is the FIRST ONE OR TWO LETTERS of one intended word. Single-letter tokens are limited to 'i' or 'a' (English single-letter words); every other token is a two-letter prefix. The output has exactly the same number of words as tokens, and each output word starts with the corresponding prefix (case-insensitive)."
-        }
+    private static func systemPrompt(styleNotes: String) -> String {
         let base = """
-        You expand a user's shorthand into full, grammatically correct English sentences.
+        You are a shorthand expander for an English typing assistant.
 
-        \(encodingRule)
+        The user types a compressed, no-space "shorthand token" and then presses ".".
+        Your job is to infer the full sentence they intended, including word boundaries,
+        missing connector words (articles, prepositions, etc.), capitalization, and grammar.
 
-        Use the surrounding text context to disambiguate. Apply natural English capitalization (sentence start, proper nouns) and punctuation INSIDE the sentence, but do NOT add a trailing period — the caller appends one if needed.
+        THE SHORTHAND IS FLEXIBLE — the user may use:
+          • the first letter of each word ("tdrh" → "the dog ran home")
+          • the first two letters of each word ("thdorah" → "the dog ran home")
+          • partial words mixed together ("iwgotosch" → "I want to go to school")
+          • full words run together with no spaces ("thedogranhome" → "the dog ran home")
+          • any mixture of the above
 
-        Produce only sentences a fluent English speaker would actually write. Discard candidates that are grammatical noise.
+        HARD RULES
+        1. Coverage: every letter the user typed must appear, in order, somewhere in your
+           expanded sentence. You may insert extra words (articles, prepositions, helpers)
+           between the user's letters, but you may not skip or reorder their letters.
+        2. Word boundaries: pick word boundaries so the result reads as a fluent, natural
+           English sentence that continues the surrounding context. The number of words is
+           NOT fixed; choose whatever count makes the sentence read naturally.
+        3. Capitalization & grammar: apply natural English capitalization (sentence start,
+           "I", proper nouns) and grammar (subject-verb agreement, tense matching the
+           surrounding context). Do NOT add a trailing period — the caller appends one.
+        4. Safety: if the compressed input is so short or ambiguous that any guess would be
+           a stretch, OR if it actually reads as a normal English word that the user probably
+           typed deliberately, set "should_expand": false and leave "expanded_sentence" empty.
 
-        Return ONLY JSON of the form:
-        {"candidates": ["best sentence", "second", "third"]}
-        Order from most likely to least likely. Always return exactly 3 candidates.
+        OUTPUT FORMAT
+        Return ONLY this JSON, no markdown, no <think> blocks, no commentary:
+        {
+          "should_expand": true,
+          "expanded_sentence": "I want to go to school",
+          "confidence": 0.88,
+          "alternatives": ["I will go to school", "I went to school"]
+        }
+
+        EXAMPLES
+
+        Tokens: "tdrh"
+        Context before: "I was walking through the park when "
+        →
+        {"should_expand": true, "expanded_sentence": "the dog ran home", "confidence": 0.9, "alternatives": ["they did rush here", "the doors remained here"]}
+
+        Tokens: "iwgotosch"
+        Context before: "Yesterday my teacher asked where I was going. "
+        →
+        {"should_expand": true, "expanded_sentence": "I want to go to school", "confidence": 0.88, "alternatives": ["I will go to school", "I went to school"]}
+
+        Tokens: "thedogranhome"
+        Context before: ""
+        →
+        {"should_expand": true, "expanded_sentence": "The dog ran home", "confidence": 0.95, "alternatives": ["The dog ran home fast", "Then the dog ran home"]}
+
+        Tokens: "hello"
+        Context before: ""
+        →
+        {"should_expand": false, "expanded_sentence": "", "confidence": 0.0, "alternatives": []}
         """
         let trimmed = styleNotes.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return base }
-        return base + "\n\nAdditional style preferences from the user:\n" + trimmed
+        return base + "\n\nADDITIONAL STYLE PREFERENCES\n" + trimmed
     }
 
-    private static func userPrompt(req: AIRerankRequest) -> String {
+    private static func userPrompt(req: ExpansionRequest) -> String {
         var lines: [String] = []
-        lines.append("Tokens (one letter per intended word):")
-        lines.append(req.tokens.joined(separator: " "))
+        lines.append("Compressed shorthand token:")
+        lines.append(req.compressedInput)
         lines.append("")
         if !req.contextBefore.isEmpty {
             lines.append("Text before cursor:")
@@ -142,17 +225,10 @@ final class MiniMaxClient {
             lines.append(req.contextAfter)
             lines.append("")
         }
-        if !req.localCandidates.isEmpty {
-            lines.append("Local decoder's current guesses (improve or replace):")
-            for (i, c) in req.localCandidates.prefix(3).enumerated() {
-                lines.append("\(i + 1). \(c)")
-            }
-            lines.append("")
-        }
         if !req.recentCorrections.isEmpty {
             lines.append("Recent confirmed corrections from this user (style examples):")
             for c in req.recentCorrections.prefix(5) {
-                lines.append("- \(c.shorthand) → \(c.final)")
+                lines.append("- \(c.compressed) → \(c.final)")
             }
         }
         return lines.joined(separator: "\n")
@@ -160,9 +236,7 @@ final class MiniMaxClient {
 
     // MARK: - Response parsing
 
-    private static func parse(_ data: Data) -> AIRerankResponse? {
-        // OpenAI-style: choices[0].message.content is a JSON string.
-        // MiniMax may also surface `reply` directly.
+    private static func parse(_ data: Data) -> ExpansionResponse? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -177,23 +251,49 @@ final class MiniMaxClient {
         }
         guard let text else { return nil }
 
-        // Some models wrap the JSON in markdown fences — strip them.
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip <think>...</think> blocks emitted by reasoning models.
+        var cleaned = text
+        while let open = cleaned.range(of: "<think>"),
+              let close = cleaned.range(of: "</think>", range: open.upperBound..<cleaned.endIndex) {
+            cleaned.removeSubrange(open.lowerBound..<close.upperBound)
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleaned.hasPrefix("```") {
             cleaned = cleaned.replacingOccurrences(of: "```json", with: "")
             cleaned = cleaned.replacingOccurrences(of: "```", with: "")
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if !cleaned.hasPrefix("{"),
+           let firstBrace = cleaned.firstIndex(of: "{"),
+           let lastBrace = cleaned.lastIndex(of: "}"),
+           firstBrace < lastBrace {
+            cleaned = String(cleaned[firstBrace...lastBrace])
+        }
 
         guard let inner = cleaned.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: inner) as? [String: Any],
-              let candidates = parsed["candidates"] as? [String] else {
+              let parsed = try? JSONSerialization.jsonObject(with: inner) as? [String: Any] else {
             return nil
         }
-        let trimmed = candidates
+
+        let shouldExpand = (parsed["should_expand"] as? Bool) ?? true
+        let expanded = (parsed["expanded_sentence"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let confidence: Double = {
+            if let n = parsed["confidence"] as? NSNumber { return n.doubleValue }
+            if let s = parsed["confidence"] as? String, let d = Double(s) { return d }
+            return 0.7
+        }()
+        let alternatives = ((parsed["alternatives"] as? [String]) ?? [])
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        if trimmed.isEmpty { return nil }
-        return AIRerankResponse(candidates: Array(trimmed.prefix(3)))
+
+        if shouldExpand && expanded.isEmpty { return nil }
+
+        return ExpansionResponse(
+            shouldExpand: shouldExpand,
+            expanded: expanded,
+            alternatives: Array(alternatives.prefix(3)),
+            confidence: confidence
+        )
     }
 }

@@ -1,21 +1,26 @@
-# Translating Keyboard / Edge
+# Lazily
 
-A workspace exploring **fast, context-aware predictive keyboards** — where the user types a tiny compressed representation of each word and the system reconstructs the full sentence using a local dictionary, n-grams, phrase memory, learned corrections, and (optionally) a self-hosted MiniMax API.
-
-The flagship example:
+A workspace for **fast, context-aware predictive typing**. The flagship product is **Lazily** — a system-wide macOS app that lets you type as lazily as you want, then expands it on `.` into a clean sentence using an LLM that knows the text around your cursor.
 
 ```
-input:    i wa to ma a pr ma re ap
-output:   i want to make a prediction market research app
+type:     iwgotosch.
+get:      I want to go to school.
+
+type:     thedogranhome.
+get:      The dog ran home.
+
+type:     tdrh.
+get:      The dog ran home.
 ```
 
-You type the first letter or two of each word; Edge fills in the rest using context.
+Normal writing with spaces is never touched. The repo also contains earlier predictive-keyboard prototypes (iOS, Node/React web, n-gram beam search) that informed Lazily.
 
 ## What's in this repo
 
 | Folder | What it is | Status |
 | --- | --- | --- |
-| **[`edge/`](edge/)** | Main TS/Node + React workspace. Prefix-based predictive keyboard backend + web UI. Beam search over a 600-word dictionary, bigrams/trigrams per domain, JSON-persisted correction memory, MiniMax adapter, backslash key correction. | Active |
+| **[`ShorthandMac/`](ShorthandMac/)** — **Lazily** | System-wide macOS app. Type a compressed no-space token (`tdrh`, `iwgotosch`, `thedogranhome`), press `.`, and an AI infers word boundaries / missing words / grammar to expand it into a clean sentence. Floating panel with alternatives + Undo. CGEventTap + Accessibility API, OpenAI-compatible AI backend (xAI / MiniMax / Groq / DeepSeek). | Active |
+| **[`edge/`](edge/)** | TS/Node + React prototype. Prefix-based predictive keyboard backend + web UI. Beam search over a 600-word dictionary, bigrams/trigrams per domain, JSON-persisted correction memory, MiniMax adapter, backslash key correction. | Active |
 | **[`edge-dashboard/`](edge-dashboard/)** | Native macOS SwiftUI dashboard for the Edge backend. Live predict, AI completions panel, corrections log, backend status. XcodeGen-generated project. | Active |
 | **[`edgetype/`](edgetype/)** | Earlier prototype using first/last-letter encoding (`te qk bn fx` → "the quick brown fox") instead of prefixes. Kept for reference and benchmarking. | Frozen |
 | **[`TranslatingKeyboard*/`](TranslatingKeyboard/)** | Original iOS keyboard extension that started this project — translates text inline as you type using the Claude API. Swift + UIKit + XcodeGen. | Maintenance |

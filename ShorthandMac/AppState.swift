@@ -10,20 +10,14 @@ final class AppState: ObservableObject {
     @Published var isEnabled: Bool = false
     @Published var hasAccessibility: Bool = false
     @Published var bufferDisplay: String = ""
-    @Published var suggestions: [String] = []          // currently-visible 3
-    @Published var lastShorthand: String? = nil
-    @Published var lastExpansion: String? = nil
     @Published var statusMessage: String = "Inactive — toggle to start listening."
-    @Published var aiEnabled: Bool                      // true when MINIMAX_API_KEY is present
-    @Published var aiInFlight: Bool = false             // for the UI's "thinking…" indicator
-    @Published var styleNotes: String = ""              // appended to AI system prompt
-    /// `1` = type one letter per word (very ambiguous, faster typing).
-    /// `2` = type two letters per word (~5× less ambiguous, default).
-    @Published var prefixLength: Int = 2 {
-        didSet {
-            interceptor.prefixLength = prefixLength
-        }
-    }
+    @Published var aiEnabled: Bool
+    @Published var aiInFlight: Bool = false
+    @Published var aiLastError: String? = nil
+    @Published var styleNotes: String = ""
+    @Published var lastCompressed: String? = nil
+    @Published var lastExpansion: String? = nil
+    @Published var lastAlternatives: [String] = []
 
     // MARK: - Dependencies
 
@@ -31,53 +25,42 @@ final class AppState: ObservableObject {
     private let panel: SuggestionPanel
     private let ai: MiniMaxClient?
 
-    /// Last N (shorthand → final) pairs that the user accepted. Used as
-    /// few-shot examples in subsequent AI calls.
-    private var recentCorrections: [(shorthand: String, final: String)] = []
+    /// Recent (compressed → final) corrections, used as few-shot examples.
+    private var recentCorrections: [(compressed: String, final: String)] = []
 
-    /// Generation counter for the AI rerank — each new keystroke bumps it,
-    /// and an in-flight rerank that finishes after the counter moved on is
-    /// discarded.
-    private var aiGeneration: UInt64 = 0
-    private var debounceTask: Task<Void, Never>?
+    /// State tracked between an expansion landing and the user either
+    /// accepting it (timeout), swapping, or undoing.
+    private struct LiveExpansion {
+        let compressed: String
+        var picked: String     // currently-inserted sentence (without ".")
+        let alternatives: [String]
+    }
+    private var liveExpansion: LiveExpansion?
+    /// Generation counter so an old AI response that arrives after a
+    /// newer trigger gets discarded.
+    private var generation: UInt64 = 0
+    /// Hide-the-panel timer after a successful expansion.
+    private var hideTask: Task<Void, Never>?
 
     init() {
-        let phrases = PhraseMemory()
-        let storeURL = AppState.defaultCorrectionStoreURL()
-        let corrections = CorrectionMemory(storeURL: storeURL, phrases: phrases)
-        let expander = SentenceExpander(phrases: phrases, corrections: corrections)
-        self.interceptor = KeystrokeInterceptor(expander: expander)
-        self.interceptor.prefixLength = 2
+        self.interceptor = KeystrokeInterceptor()
         self.panel = SuggestionPanel()
         self.ai = MiniMaxClient.makeDefault()
         self.aiEnabled = (ai != nil)
-        // When AI is configured, the panel + period auto-apply both wait
-        // for AI to produce candidates. Local results never reach the UI.
-        self.interceptor.aiOnly = (ai != nil)
 
-        interceptor.didUpdate = { [weak self] buffer, suggestions in
+        interceptor.didBufferChange = { [weak self] buf in
+            Task { @MainActor [weak self] in self?.bufferDisplay = buf }
+        }
+        interceptor.didRequestExpansion = { [weak self] compressed in
+            Task { @MainActor [weak self] in self?.handleExpansionRequest(compressed) }
+        }
+        interceptor.didExpand = { [weak self] compressed, expanded in
             Task { @MainActor [weak self] in
-                self?.handleUpdate(buffer: buffer, localSuggestions: suggestions)
+                self?.lastCompressed = compressed
+                self?.lastExpansion = expanded
+                self?.recordCorrection(compressed: compressed, final: expanded)
             }
         }
-        interceptor.didExpand = { [weak self] shorthand, sentence in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.lastShorthand = shorthand
-                self.lastExpansion = sentence
-                self.recordCorrection(shorthand: shorthand, final: sentence)
-            }
-        }
-    }
-
-    private static func defaultCorrectionStoreURL() -> URL? {
-        let fm = FileManager.default
-        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        let dir = appSupport.appendingPathComponent("ShorthandMac", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("corrections.json")
     }
 
     // MARK: - Accessibility / toggle
@@ -91,11 +74,10 @@ final class AppState: ObservableObject {
         if isEnabled {
             interceptor.stop()
             panel.hide()
-            debounceTask?.cancel()
+            hideTask?.cancel()
             isEnabled = false
             statusMessage = "Inactive — toggle to start listening."
             bufferDisplay = ""
-            suggestions = []
             return
         }
         guard hasAccessibility else {
@@ -107,8 +89,8 @@ final class AppState: ObservableObject {
             try interceptor.start()
             isEnabled = true
             statusMessage = aiEnabled
-                ? "Active — local suggestions instant, MiniMax reranks after a brief pause."
-                : "Active — local suggestions only (set MINIMAX_API_KEY in .env to enable AI)."
+                ? "Active — type a compressed sentence, then press . to expand."
+                : "Active — but AI is not configured. Add MINIMAX_API_KEY to .env and relaunch."
         } catch {
             statusMessage = "Failed to install event tap: \(error.localizedDescription)"
         }
@@ -121,108 +103,144 @@ final class AppState: ObservableObject {
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
-    // MARK: - Update / panel placement
+    // MARK: - Expansion flow
 
-    private func handleUpdate(buffer: String, localSuggestions: [String]) {
-        self.bufferDisplay = buffer
-        aiGeneration &+= 1
-        debounceTask?.cancel()
+    private func handleExpansionRequest(_ compressed: String) {
+        FileHandle.standardError.write(Data("[appstate] expansion request: '\(compressed)'\n".utf8))
+        generation &+= 1
+        let myGen = generation
+        hideTask?.cancel()
 
-        if localSuggestions.isEmpty {
-            self.suggestions = []
-            interceptor.overrideSuggestions = []
-            panel.hide()
-            aiInFlight = false
+        guard let ai else {
+            // No AI configured — re-insert the period the interceptor swallowed.
+            aiLastError = "no API key configured — set MINIMAX_API_KEY in .env"
+            interceptor.cancelExpansion()
             return
         }
 
-        // When AI is NOT configured, local is all we have — show it.
-        // When AI IS configured, hide the panel and wait for AI; we don't
-        // want local-dilution junk in front of the user.
-        if ai == nil {
-            self.suggestions = localSuggestions
-            interceptor.overrideSuggestions = []
-            let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 120)
-            panel.show(at: topLeft, suggestions: localSuggestions) { [weak self] idx in
-                Task { @MainActor in self?.pick(idx) }
-            }
-            return
-        }
-        // AI is configured — keep the panel empty until AI rerank arrives.
-        self.suggestions = []
-        interceptor.overrideSuggestions = []
-        panel.hide()
-
-        // Kick off a debounced AI rerank.
-        guard let ai else { return }
-        let myGeneration = aiGeneration
         let context = CaretLocator.contextAroundCaret(maxChars: 500)
-        let tokens = buffer.map { String($0).lowercased() }
-        let corrections = self.recentCorrections
-        let notes = self.styleNotes
-        let capturedPrefixLength = self.prefixLength
+        let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 140)
         aiInFlight = true
+        panel.showExpanding(at: topLeft, compressed: compressed)
 
-        debounceTask = Task { [weak self] in
-            // 100ms pause-detection. Shorter than before so AI fires more
-            // promptly. If a new keystroke arrives, this Task is cancelled
-            // via `aiGeneration &+= 1` + `debounceTask?.cancel()`.
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            if Task.isCancelled { return }
+        let req = ExpansionRequest(
+            compressedInput: compressed,
+            contextBefore: context.before,
+            contextAfter: context.after,
+            recentCorrections: recentCorrections,
+            styleNotes: styleNotes
+        )
 
-            let req = AIRerankRequest(
-                tokens: tokens,
-                prefixLength: capturedPrefixLength,
-                // Don't pass local guesses anymore — they were biasing the
-                // model toward weaker candidates. AI generates fresh.
-                localCandidates: [],
-                contextBefore: context.before,
-                contextAfter: context.after,
-                recentCorrections: corrections,
-                styleNotes: notes
-            )
-            let resp = await ai.rerank(req)
-
+        Task { [weak self] in
+            let result = await ai.expand(req)
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                guard self.aiGeneration == myGeneration else {
-                    // A newer keystroke superseded this call; drop the result.
-                    return
-                }
+                guard self.generation == myGen else { return }
                 self.aiInFlight = false
-                guard let resp, !resp.candidates.isEmpty else { return }
-                self.suggestions = resp.candidates
-                self.interceptor.overrideSuggestions = resp.candidates
-                let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 120)
-                self.panel.show(at: topLeft, suggestions: resp.candidates) { [weak self] idx in
-                    Task { @MainActor in self?.pick(idx) }
+                switch result {
+                case .success(let resp):
+                    FileHandle.standardError.write(Data("[appstate] AI ok: should=\(resp.shouldExpand) expanded='\(resp.expanded)' alts=\(resp.alternatives.count)\n".utf8))
+                    self.aiLastError = nil
+                    if !resp.shouldExpand || resp.expanded.isEmpty {
+                        // AI declined — re-insert the period as a no-op.
+                        self.interceptor.cancelExpansion()
+                        self.panel.hide()
+                        return
+                    }
+                    self.applyExpansion(
+                        compressed: compressed,
+                        expanded: resp.expanded,
+                        alternatives: resp.alternatives,
+                        confidence: resp.confidence
+                    )
+                case .failure(let err):
+                    FileHandle.standardError.write(Data("[appstate] AI failed: \(err.displayMessage)\n".utf8))
+                    self.aiLastError = err.displayMessage
+                    // Failure — restore the user's period unchanged.
+                    self.interceptor.cancelExpansion()
+                    let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 60)
+                    self.panel.showError(at: topLeft, message: err.displayMessage)
+                    self.scheduleHide(after: 3.5)
                 }
             }
         }
     }
 
-    // MARK: - Picks / learning
+    private func applyExpansion(compressed: String,
+                                expanded: String,
+                                alternatives: [String],
+                                confidence: Double) {
+        interceptor.applyExpansion(compressed: compressed, expanded: expanded)
+        liveExpansion = LiveExpansion(
+            compressed: compressed,
+            picked: expanded,
+            alternatives: alternatives
+        )
+        lastAlternatives = alternatives
+        showAlternativesPanel(confidence: confidence)
+    }
 
-    /// Called by the suggestion panel when the user clicks row #idx.
-    func pick(_ idx: Int) {
-        let chosen = idx < suggestions.count ? suggestions[idx] : nil
-        interceptor.applySuggestion(pickedIndex: idx, withTrailingPeriod: false)
+    private func showAlternativesPanel(confidence: Double) {
+        guard let live = liveExpansion else { return }
+        let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 140)
+        panel.showExpanded(
+            at: topLeft,
+            picked: live.picked,
+            alternatives: live.alternatives,
+            onSwap: { [weak self] alt in
+                Task { @MainActor in self?.swap(to: alt) }
+            },
+            onUndo: { [weak self] in
+                Task { @MainActor in self?.undo() }
+            }
+        )
+        // High confidence → hide quickly; low confidence → linger.
+        let linger: TimeInterval = confidence >= 0.85 ? 2.5 : 6.0
+        scheduleHide(after: linger)
+    }
+
+    private func scheduleHide(after seconds: TimeInterval) {
+        hideTask?.cancel()
+        hideTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if Task.isCancelled { return }
+            await MainActor.run { [weak self] in
+                self?.panel.hide()
+                self?.liveExpansion = nil
+            }
+        }
+    }
+
+    // MARK: - Swap / undo
+
+    /// Replace the currently-inserted expanded sentence with `alt`.
+    /// "Picked sentence + ." is what got injected → delete that many
+    /// characters, inject "alt + .".
+    private func swap(to alt: String) {
+        guard let live = liveExpansion else { return }
+        let currentLen = live.picked.count + 1 // "+1" for the period we appended
+        interceptor.injectReplacement(deletingChars: currentLen, with: alt + ".")
+        liveExpansion?.picked = alt
+        lastExpansion = alt
+        recordCorrection(compressed: live.compressed, final: alt)
+        showAlternativesPanel(confidence: 1.0)
+    }
+
+    /// Restore the user's original compressed token + period.
+    private func undo() {
+        guard let live = liveExpansion else { return }
+        let currentLen = live.picked.count + 1
+        interceptor.injectReplacement(deletingChars: currentLen, with: live.compressed + ".")
+        liveExpansion = nil
+        lastExpansion = nil
+        lastCompressed = nil
         panel.hide()
-        if let chosen, let buf = lastBufferSnapshot() {
-            recordCorrection(shorthand: buf, final: chosen)
-        }
+        hideTask?.cancel()
     }
 
-    private func lastBufferSnapshot() -> String? {
-        bufferDisplay.isEmpty ? nil : bufferDisplay
-    }
-
-    private func recordCorrection(shorthand: String, final: String) {
-        // Keep the most-recent 8 pairs, deduplicated by shorthand.
-        recentCorrections.removeAll { $0.shorthand == shorthand }
-        recentCorrections.insert((shorthand, final), at: 0)
-        if recentCorrections.count > 8 {
-            recentCorrections.removeLast()
-        }
+    private func recordCorrection(compressed: String, final: String) {
+        recentCorrections.removeAll { $0.compressed == compressed }
+        recentCorrections.insert((compressed, final), at: 0)
+        if recentCorrections.count > 8 { recentCorrections.removeLast() }
     }
 }

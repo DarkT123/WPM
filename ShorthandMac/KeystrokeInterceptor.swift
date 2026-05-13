@@ -2,18 +2,19 @@ import Foundation
 import CoreGraphics
 import ApplicationServices
 
-/// Installs a global keyboard event tap (the same mechanism Karabiner /
-/// TextExpander use). Accumulates the current run of letter keystrokes
-/// (the "buffer"); on every change the buffer is decoded into the top-3
-/// 1-letter-prefix sentence candidates and emitted via `didUpdate`.
+/// Installs a global keyboard event tap. Accumulates a "compact token" —
+/// the run of letter keystrokes since the last word boundary (space,
+/// return, tab, escape, arrow, modifier-shortcut).
 ///
-/// On `.`:  the top suggestion (if any) is auto-applied — the buffer
-/// letters are deleted via synthesized backspaces and the expanded
-/// sentence + "." is injected as a single Unicode keystroke. If there's
-/// no usable suggestion, the period passes through normally.
-///
-/// On click in the suggestion panel: the caller invokes
-/// `applySuggestion(_:withTrailingPeriod:)` for the chosen index.
+/// On `.`:
+///   • If the buffered token is 2–80 letters AND no spaces have been
+///     typed inside it (i.e. it is plausibly a compact shorthand token),
+///     the period is consumed and `didRequestExpansion` is fired with
+///     the token. AppState then calls the AI and reports back via
+///     `applyExpansion(...)`.
+///   • Otherwise (buffer empty / too short / too long / contained a
+///     space), the period passes through unchanged. Normal writing is
+///     never touched.
 final class KeystrokeInterceptor {
 
     enum InterceptorError: Error, LocalizedError {
@@ -26,39 +27,30 @@ final class KeystrokeInterceptor {
         }
     }
 
-    private let expander: SentenceExpander
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private let injectedSource: CGEventSource?
     private let injectionSentinel: Int64 = 0x5348_4F52_5448  // "SHORTH"
 
-    /// Letters typed since the last word boundary (lowercased). Mutated
-    /// only on the event-tap runloop thread (main).
+    /// Letters typed since the last word boundary (lowercased).
     private var buffer: String = ""
-    /// Latest live suggestion produced by the local decoder. Kept around
-    /// so a later "." press can auto-apply #1 without re-decoding.
-    private var latest: SentenceExpander.LiveSuggestion = .init(sentences: [], confidence: 0, tokens: [])
-    /// `1` or `2` — controls which liveSuggest mode the interceptor asks
-    /// the expander for. AppState writes this whenever the setting changes.
-    var prefixLength: Int = 2
-    /// When non-empty, period auto-apply prefers these sentences over the
-    /// interceptor's local-decoder `latest`. AppState writes it to the AI
-    /// candidates once they arrive, so a "." after AI-replaced rows
-    /// applies the AI's top guess.
-    var overrideSuggestions: [String] = []
-    /// When true, the interceptor refuses to auto-apply local-only
-    /// suggestions on "." (AI must have produced an override first).
-    /// AppState sets this when the user has MiniMax configured.
-    var aiOnly: Bool = false
 
-    /// (buffer, suggestions). Posted on the main queue. The UI uses this
-    /// both to show the panel and to refresh its row content.
-    var didUpdate: ((String, [String]) -> Void)?
-    /// Called after a successful inject (period or click). For analytics.
-    var didExpand: ((String, String) -> Void)?
+    /// Min/max length for a token to be considered shorthand. Below the
+    /// floor we treat it as a typo and let "." through normally.
+    var minShorthandLength = 2
+    var maxShorthandLength = 80
 
-    init(expander: SentenceExpander) {
-        self.expander = expander
+    /// Fired whenever the buffer changes — for live UI feedback.
+    var didBufferChange: ((String) -> Void)?
+    /// Fired when the user types "." on a plausible shorthand token. The
+    /// interceptor has already consumed the period; AppState should call
+    /// `applyExpansion(...)` once it has a result (or call
+    /// `cancelExpansion(...)` to reinsert the period unchanged).
+    var didRequestExpansion: ((String) -> Void)?
+    /// Fired after a successful inject — for analytics / history.
+    var didExpand: ((_ compressed: String, _ expanded: String) -> Void)?
+
+    init() {
         let src = CGEventSource(stateID: .privateState)
         src?.userData = 0x5348_4F52_5448
         self.injectedSource = src
@@ -92,6 +84,7 @@ final class KeystrokeInterceptor {
         runLoopSource = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
+        FileHandle.standardError.write(Data("[interceptor] tap installed\n".utf8))
     }
 
     func stop() {
@@ -104,23 +97,45 @@ final class KeystrokeInterceptor {
         clearBuffer()
     }
 
-    // MARK: - Public — called from the suggestion panel
+    // MARK: - Public
 
-    /// Apply the suggestion at index `pickedIndex`. Prefers
-    /// `overrideSuggestions` (set by AppState when AI has reranked)
-    /// over the interceptor's own local-decoder result.
-    func applySuggestion(pickedIndex idx: Int, withTrailingPeriod: Bool) {
-        let pool = overrideSuggestions.isEmpty ? latest.sentences : overrideSuggestions
-        guard idx >= 0, idx < pool.count else { return }
-        let sentence = pool[idx]
-        let bufferLen = buffer.count
-        let text = withTrailingPeriod ? sentence + "." : sentence
-        let original = buffer
-        clearBuffer()
-        injectReplacement(deletingChars: bufferLen, with: text)
-        DispatchQueue.main.async { [weak self] in
-            self?.didExpand?(original, sentence)
+    /// Replace `deletingChars` characters before the caret with `text`.
+    /// Used both when expansion succeeds and when the user picks an
+    /// alternative or undoes.
+    func injectReplacement(deletingChars count: Int, with text: String) {
+        guard let source = injectedSource else { return }
+        for _ in 0..<count {
+            CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)?
+                .post(tap: .cgAnnotatedSessionEventTap)
+            CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)?
+                .post(tap: .cgAnnotatedSessionEventTap)
         }
+        guard !text.isEmpty else { return }
+        let utf16 = Array(text.utf16)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+        down?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        down?.post(tap: .cgAnnotatedSessionEventTap)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+        up?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+        up?.post(tap: .cgAnnotatedSessionEventTap)
+    }
+
+    /// Successful expansion. The interceptor already swallowed the "."
+    /// when it fired the request — so we delete `compressed.count` chars
+    /// (the shorthand letters) and inject `expanded + "."`.
+    func applyExpansion(compressed: String, expanded: String) {
+        clearBuffer()
+        injectReplacement(deletingChars: compressed.count, with: expanded + ".")
+        DispatchQueue.main.async { [weak self] in
+            self?.didExpand?(compressed, expanded)
+        }
+    }
+
+    /// AI declined to expand (or failed). Reinsert the period that the
+    /// interceptor swallowed so the user's sentence is unchanged.
+    func cancelExpansion() {
+        clearBuffer()
+        injectReplacement(deletingChars: 0, with: ".")
     }
 
     // MARK: - Callback
@@ -144,11 +159,11 @@ final class KeystrokeInterceptor {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
-        // Backspace: pop one, pass through, refresh suggestions.
+        // Backspace: pop one, pass through.
         if keyCode == 0x33 {
             if !buffer.isEmpty {
                 buffer.removeLast()
-                refreshSuggestions()
+                emitBuffer()
             }
             return Unmanaged.passUnretained(event)
         }
@@ -177,74 +192,53 @@ final class KeystrokeInterceptor {
         let s = String(utf16CodeUnits: chars, count: length)
 
         // The "." trigger.
-        //   - When AI is configured (aiOnly): only auto-apply if AI has
-        //     produced an override list for the current buffer.
-        //   - When AI isn't configured: fall back to the local pool.
         if s == "." {
-            let pool: [String]
-            if aiOnly {
-                pool = overrideSuggestions
-            } else {
-                pool = overrideSuggestions.isEmpty ? latest.sentences : overrideSuggestions
-            }
-            if !pool.isEmpty, buffer.count >= 2 {
-                applySuggestion(pickedIndex: 0, withTrailingPeriod: true)
+            let len = buffer.count
+            FileHandle.standardError.write(Data("[interceptor] '.' pressed, buffer='\(buffer)' (\(len) chars)\n".utf8))
+            if len >= minShorthandLength && len <= maxShorthandLength {
+                let compressed = buffer
+                clearBuffer()
+                DispatchQueue.main.async { [weak self] in
+                    self?.didRequestExpansion?(compressed)
+                }
                 return nil   // consume the "."
             }
             clearBuffer()
             return Unmanaged.passUnretained(event)
         }
 
-        // Letter accumulation — one char per token in the live decoder.
+        // Letter accumulation.
         if s.count == 1, let scalar = s.unicodeScalars.first,
            CharacterSet.letters.contains(scalar) {
             buffer.append(Character(s.lowercased()))
-            if buffer.count > 40 { buffer = String(buffer.suffix(40)) }
-            refreshSuggestions()
+            if buffer.count > maxShorthandLength + 4 {
+                // Past the upper bound it's not a shorthand candidate
+                // anymore — drop the buffer so the next "." doesn't
+                // surprise the user.
+                clearBuffer()
+                return Unmanaged.passUnretained(event)
+            }
+            emitBuffer()
             return Unmanaged.passUnretained(event)
         }
 
-        // Anything else (space, digits, other punctuation) clears.
+        // Anything else (space, digits, other punctuation) is a word
+        // boundary — normal writing should never be transformed.
         clearBuffer()
         return Unmanaged.passUnretained(event)
     }
 
     private func clearBuffer() {
-        if !buffer.isEmpty || !latest.sentences.isEmpty {
+        if !buffer.isEmpty {
             buffer = ""
-            latest = .init(sentences: [], confidence: 0, tokens: [])
-            let snap = buffer
-            DispatchQueue.main.async { [weak self] in
-                self?.didUpdate?(snap, [])
-            }
+            emitBuffer()
         }
     }
 
-    private func refreshSuggestions() {
-        latest = expander.liveSuggest(buffer: buffer, prefixLength: prefixLength, count: 3)
-        let buf = buffer
-        let s = latest.sentences
+    private func emitBuffer() {
+        let snap = buffer
         DispatchQueue.main.async { [weak self] in
-            self?.didUpdate?(buf, s)
+            self?.didBufferChange?(snap)
         }
-    }
-
-    // MARK: - Synthesis
-
-    private func injectReplacement(deletingChars count: Int, with text: String) {
-        guard let source = injectedSource else { return }
-        for _ in 0..<count {
-            CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)?
-                .post(tap: .cgAnnotatedSessionEventTap)
-            CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)?
-                .post(tap: .cgAnnotatedSessionEventTap)
-        }
-        let utf16 = Array(text.utf16)
-        let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-        down?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        down?.post(tap: .cgAnnotatedSessionEventTap)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
-        up?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
-        up?.post(tap: .cgAnnotatedSessionEventTap)
     }
 }

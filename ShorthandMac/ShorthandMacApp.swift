@@ -1,11 +1,11 @@
 import SwiftUI
 
 @main
-struct ShorthandMacApp: App {
+struct LazilyApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {
-        WindowGroup("Shorthand") {
+        WindowGroup("Lazily") {
             ContentView()
                 .environmentObject(state)
                 .frame(minWidth: 460, minHeight: 540)
