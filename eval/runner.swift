@@ -108,6 +108,7 @@ enum Runner {
                     compressedInput: c.compressed_input,
                     contextBefore: c.context_before,
                     contextAfter: c.context_after,
+                    appName: nil,
                     recentCorrections: [],
                     styleNotes: ""
                 )
@@ -164,7 +165,9 @@ enum Runner {
 
     static func normalize(_ s: String) -> String {
         var t = s.lowercased()
-        let stripped = t.unicodeScalars.filter { CharacterSet.letters.contains($0) || $0 == " " }
+        let stripped = t.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0) || $0 == " "
+        }
         t = String(String.UnicodeScalarView(stripped))
         while t.contains("  ") { t = t.replacingOccurrences(of: "  ", with: " ") }
         return t.trimmingCharacters(in: .whitespaces)

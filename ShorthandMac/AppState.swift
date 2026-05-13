@@ -31,8 +31,23 @@ final class AppState: ObservableObject {
     private let panel: SuggestionPanel
     private let ai: MiniMaxClient?
 
-    /// Recent (compressed → final) corrections, used as few-shot examples.
-    private var recentCorrections: [(compressed: String, final: String)] = []
+    /// Persistent (compressed → final) correction history. Used as
+    /// few-shot examples in subsequent expansion requests and re-loaded
+    /// from disk on launch.
+    private let corrections: CorrectionStore
+
+    /// State needed to build a CorrectionRecord after the user has
+    /// either accepted (timeout / swap) or rejected (undo) an expansion.
+    private struct PendingRecord {
+        let compressed: String
+        let generated: String
+        let confidence: Double
+        let alternatives: [String]
+        let contextBefore: String
+        let contextAfter: String
+        let appName: String?
+    }
+    private var pendingRecord: PendingRecord?
 
     /// Set when an expansion has been applied and we're waiting for the
     /// user to either accept it (timeout), swap to an alternative, or undo.
@@ -61,6 +76,7 @@ final class AppState: ObservableObject {
         self.panel = SuggestionPanel()
         self.ai = MiniMaxClient.makeDefault()
         self.aiEnabled = (ai != nil)
+        self.corrections = CorrectionStore()
 
         interceptor.didBufferChange = { [weak self] buf in
             Task { @MainActor [weak self] in self?.bufferDisplay = buf }
@@ -72,7 +88,6 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.lastCompressed = compressed
                 self?.lastExpansion = expanded
-                self?.recordCorrection(compressed: compressed, final: expanded)
             }
         }
         interceptor.didPressArmedKey = { [weak self] key in
@@ -128,16 +143,16 @@ final class AppState: ObservableObject {
         let myGen = generation
         hideTask?.cancel()
 
-        // Pre-AI gate: cheap local heuristics that reject contexts where
-        // expanding would almost certainly be wrong (Terminal, IDEs,
-        // URLs, code identifiers, common English words).
         let context = CaretLocator.contextAroundCaret(maxChars: 500)
-        let focusedApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let bundleID = frontApp?.bundleIdentifier
+        let appName = frontApp?.localizedName
+
         let decision = ExpansionGate.check(
             compressed: compressed,
             contextBefore: context.before,
             contextAfter: context.after,
-            focusedAppBundleID: focusedApp,
+            focusedAppBundleID: bundleID,
             aggressiveMode: aggressiveMode
         )
         if case .skip(let reason) = decision {
@@ -158,11 +173,14 @@ final class AppState: ObservableObject {
         aiInFlight = true
         panel.showExpanding(at: topLeft, compressed: compressed)
 
+        let relevantCorrections = corrections.relevant(forCompressed: compressed, appName: appName, limit: 5)
+
         let req = ExpansionRequest(
             compressedInput: compressed,
             contextBefore: context.before,
             contextAfter: context.after,
-            recentCorrections: recentCorrections,
+            appName: appName,
+            recentCorrections: relevantCorrections,
             styleNotes: styleNotes
         )
 
@@ -173,7 +191,12 @@ final class AppState: ObservableObject {
                 guard self.generation == myGen else { return }
                 self.aiInFlight = false
                 switch result {
-                case .success(let resp):
+                case .success(let rawResp):
+                    let resp = LocalReranker.rerank(
+                        rawResp,
+                        compressedInput: compressed,
+                        recentCorrections: relevantCorrections
+                    )
                     FileHandle.standardError.write(Data("[appstate] AI ok: should=\(resp.shouldExpand) conf=\(resp.confidence) expanded='\(resp.expanded)' alts=\(resp.alternatives.count)\n".utf8))
                     self.aiLastError = nil
                     if !resp.shouldExpand || resp.expanded.isEmpty {
@@ -181,6 +204,15 @@ final class AppState: ObservableObject {
                         self.panel.hide()
                         return
                     }
+                    self.pendingRecord = PendingRecord(
+                        compressed: compressed,
+                        generated: resp.expanded,
+                        confidence: resp.confidence,
+                        alternatives: resp.alternatives,
+                        contextBefore: context.before,
+                        contextAfter: context.after,
+                        appName: appName
+                    )
                     self.routeByConfidence(
                         compressed: compressed,
                         expanded: resp.expanded,
@@ -199,16 +231,23 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Three confidence bands:
-    ///   • ≥0.85 — auto-replace, short panel
-    ///   • 0.60–0.84 — auto-replace, longer panel, arm 1/2/3 swap + Cmd+Z undo
-    ///   • <0.60 — don't replace, restore period, show "did you mean" panel,
-    ///             arm 1/2/3 to apply a pick
+    /// Four confidence bands:
+    ///   • ≥0.85 — auto-replace, short panel (2.5s)
+    ///   • 0.65–0.84 — auto-replace, longer panel (6s), arm 1/2/3 swap + Cmd+Z undo
+    ///   • 0.45–0.64 — DON'T replace, show "did you mean…" panel, arm 1/2/3 to apply
+    ///   • <0.45 — do nothing, restore the period and hide the panel
     private func routeByConfidence(compressed: String,
                                    expanded: String,
                                    alternatives: [String],
                                    confidence: Double) {
-        if confidence < 0.60 {
+        if confidence < 0.45 {
+            FileHandle.standardError.write(Data("[appstate] very low conf (\(confidence)) — silent\n".utf8))
+            interceptor.cancelExpansion()
+            panel.hide()
+            pendingRecord = nil
+            return
+        }
+        if confidence < 0.65 {
             // Don't touch the text. The interceptor already swallowed
             // the "." — put it back so the user's sentence isn't damaged.
             interceptor.cancelExpansion()
@@ -235,7 +274,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        // 0.60+ → apply.
+        // 0.65+ → apply.
         applyExpansion(compressed: compressed,
                        expanded: expanded,
                        alternatives: alternatives,
@@ -285,12 +324,44 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             if Task.isCancelled { return }
             await MainActor.run { [weak self] in
-                self?.panel.hide()
-                self?.liveExpansion = nil
-                self?.pendingSuggestion = nil
-                self?.interceptor.disarmFollowUpKeys()
+                guard let self else { return }
+                // If the user let the panel time out, treat the current
+                // expansion as accepted as-is and write the correction.
+                if let live = self.liveExpansion, let pending = self.pendingRecord {
+                    self.persistCorrection(
+                        from: pending,
+                        finalSentence: live.picked,
+                        pickedAlt: nil,
+                        rejected: live.alternatives
+                    )
+                    self.pendingRecord = nil
+                }
+                self.panel.hide()
+                self.liveExpansion = nil
+                self.pendingSuggestion = nil
+                self.interceptor.disarmFollowUpKeys()
             }
         }
+    }
+
+    private func persistCorrection(from p: PendingRecord,
+                                   finalSentence: String,
+                                   pickedAlt: String?,
+                                   rejected: [String]) {
+        let rec = CorrectionRecord(
+            compressedInput: p.compressed,
+            generatedSentence: p.generated,
+            finalUserSentence: finalSentence,
+            confidence: p.confidence,
+            alternatives: p.alternatives,
+            pickedAlternative: pickedAlt,
+            rejectedAlternatives: rejected,
+            contextBefore: p.contextBefore,
+            contextAfter: p.contextAfter,
+            appName: p.appName,
+            timestamp: Date()
+        )
+        corrections.record(rec)
     }
 
     // MARK: - Armed-key callbacks (from interceptor)
@@ -317,28 +388,32 @@ final class AppState: ObservableObject {
     }
 
     /// Apply one of the low-confidence "did you mean…" candidates.
-    /// Text was not modified yet, so we delete 0 chars and inject the pick.
+    /// Text was not modified yet, so we delete the (compressed + ".")
+    /// the interceptor restored and inject the pick.
     private func applySuggestion(at idx: Int) {
         guard let pending = pendingSuggestion,
               idx >= 0, idx < pending.candidates.count else { return }
         let pick = pending.candidates[idx]
-        // The interceptor never swallowed the period in the low-confidence
-        // path (we re-inserted it via cancelExpansion). So the host buffer
-        // currently has `<compressed>.` at the cursor. Replace those.
         interceptor.injectReplacement(
             deletingChars: pending.compressed.count + 1,
             with: pick + "."
         )
+        let rejected = pending.candidates.filter { $0 != pick }
         liveExpansion = LiveExpansion(
             compressed: pending.compressed,
             picked: pick,
-            alternatives: pending.candidates.filter { $0 != pick }
+            alternatives: rejected
         )
         pendingSuggestion = nil
         lastCompressed = pending.compressed
         lastExpansion = pick
-        lastAlternatives = liveExpansion?.alternatives ?? []
-        recordCorrection(compressed: pending.compressed, final: pick)
+        lastAlternatives = rejected
+        if let p = pendingRecord {
+            persistCorrection(from: p, finalSentence: pick,
+                              pickedAlt: pick == p.generated ? nil : pick,
+                              rejected: rejected)
+            pendingRecord = nil
+        }
         showAlternativesPanel(confidence: 1.0)
         interceptor.armUndoKey(seconds: 6)
     }
@@ -356,9 +431,13 @@ final class AppState: ObservableObject {
         guard let live = liveExpansion else { return }
         let currentLen = live.picked.count + 1
         interceptor.injectReplacement(deletingChars: currentLen, with: alt + ".")
+        let rejected = live.alternatives.filter { $0 != alt } + (live.picked != alt ? [live.picked] : [])
         liveExpansion?.picked = alt
         lastExpansion = alt
-        recordCorrection(compressed: live.compressed, final: alt)
+        if let p = pendingRecord {
+            persistCorrection(from: p, finalSentence: alt, pickedAlt: alt, rejected: rejected)
+            pendingRecord = nil
+        }
         showAlternativesPanel(confidence: 1.0)
         interceptor.armUndoKey(seconds: 6)
     }
@@ -367,17 +446,20 @@ final class AppState: ObservableObject {
         guard let live = liveExpansion else { return }
         let currentLen = live.picked.count + 1
         interceptor.injectReplacement(deletingChars: currentLen, with: live.compressed + ".")
+        // An undo means "you got this wrong" — record an empty final
+        // sentence so the model learns NOT to repeat that expansion.
+        if let p = pendingRecord {
+            persistCorrection(from: p,
+                              finalSentence: "",
+                              pickedAlt: nil,
+                              rejected: [p.generated] + p.alternatives)
+            pendingRecord = nil
+        }
         liveExpansion = nil
         lastExpansion = nil
         lastCompressed = nil
         panel.hide()
         hideTask?.cancel()
         interceptor.disarmFollowUpKeys()
-    }
-
-    private func recordCorrection(compressed: String, final: String) {
-        recentCorrections.removeAll { $0.compressed == compressed }
-        recentCorrections.insert((compressed, final), at: 0)
-        if recentCorrections.count > 8 { recentCorrections.removeLast() }
     }
 }

@@ -2,31 +2,39 @@ import Foundation
 
 struct ExpansionRequest {
     /// The compressed no-space token the user just typed (lowercased).
-    /// Could be one letter per word ("tdrh"), partial words ("iwgotosch"),
-    /// or full words mashed together ("thedogranhome").
     let compressedInput: String
     /// Text immediately preceding the cursor in the host app (up to ~500 chars).
     let contextBefore: String
     /// Text immediately following the cursor.
     let contextAfter: String
+    /// Frontmost app's localized name ("Notes", "Slack", "Messages") if known.
+    let appName: String?
     /// Recent (compressed → final) corrections — used as few-shot examples.
     let recentCorrections: [(compressed: String, final: String)]
     /// User-supplied free-text style notes, appended to the system prompt.
     let styleNotes: String
 }
 
+/// One candidate from the AI plus its self-reported confidence. Used by
+/// the local reranker to re-sort against typed-evidence / length / etc.
+struct ExpansionCandidate: Equatable {
+    let expanded: String
+    let confidence: Double
+}
+
 struct ExpansionResponse: Equatable {
     /// False if the AI judges this is not actually shorthand (e.g. the
-    /// user typed a real word like "hello" and pressed period). Caller
-    /// should leave the typed text alone in that case.
+    /// user typed a real word like "hello" and pressed period).
     let shouldExpand: Bool
-    /// Best-guess full sentence. Empty when shouldExpand is false.
+    /// Best-guess full sentence (best of `candidates`).
     let expanded: String
-    /// Up to ~3 alternative sentences for the user to swap to.
-    let alternatives: [String]
-    /// Self-reported confidence, 0–1. Used by the UI to decide whether to
-    /// auto-hide the alternatives panel quickly or leave it lingering.
+    /// Self-reported confidence of the best candidate, 0–1.
     let confidence: Double
+    /// Up to 3 alternative sentences (strings only, for the panel).
+    let alternatives: [String]
+    /// Rich (sentence, confidence) tuples — best first. Used by the
+    /// local reranker.
+    let candidates: [ExpansionCandidate]
 }
 
 enum ExpansionError: Error, Equatable {
@@ -160,63 +168,83 @@ final class MiniMaxClient {
 
     private static func systemPrompt(styleNotes: String) -> String {
         let base = """
-        You are a shorthand expander for an English typing assistant.
+        You are the expansion engine for Lazily, a hybrid shorthand writing app.
 
-        The user types a compressed, no-space "shorthand token" and then presses ".".
-        Your job is to infer the full sentence they intended, including word boundaries,
-        missing connector words (articles, prepositions, etc.), capitalization, and grammar.
+        The user types a compressed no-space version of a sentence and presses ".".
+        Your job is to infer the most likely full sentence.
 
-        THE SHORTHAND IS FLEXIBLE — the user may use:
-          • the first letter of each word ("tdrh" → "the dog ran home")
-          • the first two letters of each word ("thdorah" → "the dog ran home")
-          • partial words mixed together ("iwgotosch" → "I want to go to school")
-          • full words run together with no spaces ("thedogranhome" → "the dog ran home")
+        THE INPUT IS FLEXIBLE — it may contain:
+          • one-letter word hints
+          • partial words (e.g. "sch" → "school", "tmrw" → "tomorrow")
+          • full words without spaces
+          • abbreviations (hw → homework, bc → because, rn → right now, u → you)
+          • missing connector words (the, a, of, to, is, etc.)
           • any mixture of the above
 
+        YOU MUST INFER
+          • word boundaries
+          • missing words
+          • grammar
+          • capitalization
+          • the sentence that best fits surrounding context
+
         HARD RULES
-        1. Coverage: every letter the user typed must appear, in order, somewhere in your
-           expanded sentence. You may insert extra words (articles, prepositions, helpers)
-           between the user's letters, but you may not skip or reorder their letters.
-        2. Word boundaries: pick word boundaries so the result reads as a fluent, natural
-           English sentence that continues the surrounding context. The number of words is
-           NOT fixed; choose whatever count makes the sentence read naturally.
-        3. Capitalization & grammar: apply natural English capitalization (sentence start,
-           "I", proper nouns) and grammar (subject-verb agreement, tense matching the
-           surrounding context). Do NOT add a trailing period — the caller appends one.
-        4. Safety: if the compressed input is so short or ambiguous that any guess would be
-           a stretch, OR if it actually reads as a normal English word that the user probably
-           typed deliberately, set "should_expand": false and leave "expanded_sentence" empty.
+        1. Return ONLY valid JSON in the exact format below. No markdown, no <think>, no commentary.
+        2. Generate 3 candidate expansions, best first.
+        3. Each sentence must be natural, grammatical English a fluent speaker would write.
+        4. PREFER SIMPLE, LIKELY sentences over verbose / fancy ones.
+        5. Treat the user's typed letters as STRONG EVIDENCE — every letter they typed must
+           appear, in order, in your expanded sentence. You may insert connector words
+           between them, but you may not skip or reorder their letters.
+        6. If the user typed a clearly partial or full word ("sch", "home", "school"), preserve
+           that meaning — don't replace it with a phonetically similar but different word.
+        7. Use context_before and context_after to disambiguate.
+        8. Use recent_corrections to match the user's style and prior word choices.
+        9. Do NOT add a trailing period — the caller appends one.
+        10. If the input is too ambiguous or actually reads as a normal English word the user
+            probably typed deliberately, set "should_expand": false and leave best empty.
+        11. Calibrate confidence honestly: 0.9+ when the answer is obvious; 0.5–0.7 when
+            multiple readings are plausible; below 0.5 when you're guessing.
 
         OUTPUT FORMAT
-        Return ONLY this JSON, no markdown, no <think> blocks, no commentary:
         {
           "should_expand": true,
-          "expanded_sentence": "I want to go to school",
-          "confidence": 0.88,
-          "alternatives": ["I will go to school", "I went to school"]
+          "best": {
+            "expanded_sentence": "I want to go to school",
+            "confidence": 0.88,
+            "reason": "Fits the compressed input and common phrasing."
+          },
+          "alternatives": [
+            {"expanded_sentence": "I will go to school", "confidence": 0.72},
+            {"expanded_sentence": "I went to school", "confidence": 0.61}
+          ]
         }
 
         EXAMPLES
 
-        Tokens: "tdrh"
+        Input: "tdrh"
         Context before: "I was walking through the park when "
-        →
-        {"should_expand": true, "expanded_sentence": "the dog ran home", "confidence": 0.9, "alternatives": ["they did rush here", "the doors remained here"]}
+        → {"should_expand": true, "best": {"expanded_sentence": "the dog ran home", "confidence": 0.9, "reason": "Most natural completion in this context."}, "alternatives": [{"expanded_sentence": "they did run home", "confidence": 0.55}, {"expanded_sentence": "that dog ran here", "confidence": 0.4}]}
 
-        Tokens: "iwgotosch"
+        Input: "iwgotosch"
         Context before: "Yesterday my teacher asked where I was going. "
-        →
-        {"should_expand": true, "expanded_sentence": "I want to go to school", "confidence": 0.88, "alternatives": ["I will go to school", "I went to school"]}
+        → {"should_expand": true, "best": {"expanded_sentence": "I want to go to school", "confidence": 0.88, "reason": "‘sch’ → school; ‘iw’ → I want, with inserted ‘to’."}, "alternatives": [{"expanded_sentence": "I will go to school", "confidence": 0.72}, {"expanded_sentence": "I went to school", "confidence": 0.61}]}
 
-        Tokens: "thedogranhome"
+        Input: "thedogranhome"
         Context before: ""
-        →
-        {"should_expand": true, "expanded_sentence": "The dog ran home", "confidence": 0.95, "alternatives": ["The dog ran home fast", "Then the dog ran home"]}
+        → {"should_expand": true, "best": {"expanded_sentence": "The dog ran home", "confidence": 0.96, "reason": "Full words run together; just add spaces."}, "alternatives": [{"expanded_sentence": "Then the dog ran home", "confidence": 0.5}, {"expanded_sentence": "The dog ran home fast", "confidence": 0.4}]}
 
-        Tokens: "hello"
+        Input: "tmrwihavetest"
         Context before: ""
-        →
-        {"should_expand": false, "expanded_sentence": "", "confidence": 0.0, "alternatives": []}
+        → {"should_expand": true, "best": {"expanded_sentence": "Tomorrow I have a test", "confidence": 0.9, "reason": "‘tmrw’ → tomorrow; insert ‘a’ before ‘test’."}, "alternatives": [{"expanded_sentence": "Tomorrow I have the test", "confidence": 0.65}, {"expanded_sentence": "Tomorrow I have tests", "confidence": 0.45}]}
+
+        Input: "canyouhlpmewithhw"
+        Context before: ""
+        → {"should_expand": true, "best": {"expanded_sentence": "Can you help me with homework", "confidence": 0.9, "reason": "‘hlp’ → help; ‘hw’ → homework."}, "alternatives": [{"expanded_sentence": "Can you help me with my homework", "confidence": 0.75}, {"expanded_sentence": "Can you help me with the homework", "confidence": 0.6}]}
+
+        Input: "hello"
+        Context before: ""
+        → {"should_expand": false, "best": {"expanded_sentence": "", "confidence": 0.0, "reason": "Already a normal English word."}, "alternatives": []}
         """
         let trimmed = styleNotes.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return base }
@@ -228,6 +256,10 @@ final class MiniMaxClient {
         lines.append("Compressed shorthand token:")
         lines.append(req.compressedInput)
         lines.append("")
+        if let app = req.appName, !app.isEmpty {
+            lines.append("App where the user is typing: \(app)")
+            lines.append("")
+        }
         if !req.contextBefore.isEmpty {
             lines.append("Text before cursor:")
             lines.append(req.contextBefore)
@@ -238,8 +270,12 @@ final class MiniMaxClient {
             lines.append(req.contextAfter)
             lines.append("")
         }
+        if let hints = AbbreviationHints.promptHints(for: req.compressedInput) {
+            lines.append(hints)
+            lines.append("")
+        }
         if !req.recentCorrections.isEmpty {
-            lines.append("Recent confirmed corrections from this user (style examples):")
+            lines.append("Recent confirmed corrections from this user (style examples — prefer these word choices when applicable):")
             for c in req.recentCorrections.prefix(5) {
                 lines.append("- \(c.compressed) → \(c.final)")
             }
@@ -289,24 +325,75 @@ final class MiniMaxClient {
         }
 
         let shouldExpand = (parsed["should_expand"] as? Bool) ?? true
-        let expanded = (parsed["expanded_sentence"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let confidence: Double = {
-            if let n = parsed["confidence"] as? NSNumber { return n.doubleValue }
-            if let s = parsed["confidence"] as? String, let d = Double(s) { return d }
-            return 0.7
-        }()
-        let alternatives = ((parsed["alternatives"] as? [String]) ?? [])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
 
-        if shouldExpand && expanded.isEmpty { return nil }
+        // Helper to read a confidence value tolerantly.
+        func readConfidence(_ any: Any?) -> Double {
+            if let n = any as? NSNumber { return n.doubleValue }
+            if let s = any as? String, let d = Double(s) { return d }
+            return 0.7
+        }
+
+        var candidates: [ExpansionCandidate] = []
+
+        // Schema A (new, nested): {"best": {...}, "alternatives": [{...}]}
+        if let best = parsed["best"] as? [String: Any] {
+            let bestText = (best["expanded_sentence"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let bestConf = readConfidence(best["confidence"])
+            if !bestText.isEmpty {
+                candidates.append(ExpansionCandidate(expanded: bestText, confidence: bestConf))
+            }
+            if let alts = parsed["alternatives"] as? [[String: Any]] {
+                for alt in alts {
+                    let text = (alt["expanded_sentence"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let conf = readConfidence(alt["confidence"])
+                    if !text.isEmpty {
+                        candidates.append(ExpansionCandidate(expanded: text, confidence: conf))
+                    }
+                }
+            }
+        }
+
+        // Schema B (old, flat): {"expanded_sentence": "...", "alternatives": ["..."]}
+        if candidates.isEmpty {
+            let expanded = (parsed["expanded_sentence"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let conf = readConfidence(parsed["confidence"])
+            if !expanded.isEmpty {
+                candidates.append(ExpansionCandidate(expanded: expanded, confidence: conf))
+            }
+            if let alts = parsed["alternatives"] as? [String] {
+                let altConf = max(0, conf - 0.15)
+                for a in alts {
+                    let s = a.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty {
+                        candidates.append(ExpansionCandidate(expanded: s, confidence: altConf))
+                    }
+                }
+            }
+        }
+
+        // Dedupe by normalized text, preserving order.
+        var seen = Set<String>()
+        candidates = candidates.filter {
+            let key = $0.expanded.lowercased()
+            if seen.contains(key) { return false }
+            seen.insert(key)
+            return true
+        }
+
+        if shouldExpand && candidates.isEmpty { return nil }
+
+        let best = candidates.first
+        let alternatives = candidates.dropFirst().prefix(3).map { $0.expanded }
 
         return ExpansionResponse(
             shouldExpand: shouldExpand,
-            expanded: expanded,
-            alternatives: Array(alternatives.prefix(3)),
-            confidence: confidence
+            expanded: best?.expanded ?? "",
+            confidence: best?.confidence ?? 0,
+            alternatives: Array(alternatives),
+            candidates: candidates
         )
     }
 }
