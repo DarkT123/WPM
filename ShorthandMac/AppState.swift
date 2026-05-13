@@ -18,6 +18,12 @@ final class AppState: ObservableObject {
     @Published var lastCompressed: String? = nil
     @Published var lastExpansion: String? = nil
     @Published var lastAlternatives: [String] = []
+    /// When true, expand even when the buffered token is a normal English
+    /// word. Off by default to keep typing safe.
+    @Published var aggressiveMode: Bool = false
+    /// Most recent gate-skip reason. Shown in the settings window so the
+    /// user can see why an expansion didn't happen.
+    @Published var lastGateSkipReason: String? = nil
 
     // MARK: - Dependencies
 
@@ -28,14 +34,22 @@ final class AppState: ObservableObject {
     /// Recent (compressed → final) corrections, used as few-shot examples.
     private var recentCorrections: [(compressed: String, final: String)] = []
 
-    /// State tracked between an expansion landing and the user either
-    /// accepting it (timeout), swapping, or undoing.
+    /// Set when an expansion has been applied and we're waiting for the
+    /// user to either accept it (timeout), swap to an alternative, or undo.
     private struct LiveExpansion {
         let compressed: String
         var picked: String     // currently-inserted sentence (without ".")
         let alternatives: [String]
     }
     private var liveExpansion: LiveExpansion?
+    /// Set when AI returned a low-confidence guess and we did NOT apply
+    /// it — panel is offering 1/2/3 picks but the user's text is still
+    /// the original compressed token + period.
+    private struct PendingSuggestion {
+        let compressed: String
+        let candidates: [String]
+    }
+    private var pendingSuggestion: PendingSuggestion?
     /// Generation counter so an old AI response that arrives after a
     /// newer trigger gets discarded.
     private var generation: UInt64 = 0
@@ -60,6 +74,9 @@ final class AppState: ObservableObject {
                 self?.lastExpansion = expanded
                 self?.recordCorrection(compressed: compressed, final: expanded)
             }
+        }
+        interceptor.didPressArmedKey = { [weak self] key in
+            Task { @MainActor [weak self] in self?.handleArmedKey(key) }
         }
     }
 
@@ -111,14 +128,32 @@ final class AppState: ObservableObject {
         let myGen = generation
         hideTask?.cancel()
 
+        // Pre-AI gate: cheap local heuristics that reject contexts where
+        // expanding would almost certainly be wrong (Terminal, IDEs,
+        // URLs, code identifiers, common English words).
+        let context = CaretLocator.contextAroundCaret(maxChars: 500)
+        let focusedApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let decision = ExpansionGate.check(
+            compressed: compressed,
+            contextBefore: context.before,
+            contextAfter: context.after,
+            focusedAppBundleID: focusedApp,
+            aggressiveMode: aggressiveMode
+        )
+        if case .skip(let reason) = decision {
+            FileHandle.standardError.write(Data("[appstate] gate skip: \(reason)\n".utf8))
+            self.lastGateSkipReason = reason
+            interceptor.cancelExpansion()
+            return
+        }
+        self.lastGateSkipReason = nil
+
         guard let ai else {
-            // No AI configured — re-insert the period the interceptor swallowed.
             aiLastError = "no API key configured — set MINIMAX_API_KEY in .env"
             interceptor.cancelExpansion()
             return
         }
 
-        let context = CaretLocator.contextAroundCaret(maxChars: 500)
         let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 140)
         aiInFlight = true
         panel.showExpanding(at: topLeft, compressed: compressed)
@@ -139,15 +174,14 @@ final class AppState: ObservableObject {
                 self.aiInFlight = false
                 switch result {
                 case .success(let resp):
-                    FileHandle.standardError.write(Data("[appstate] AI ok: should=\(resp.shouldExpand) expanded='\(resp.expanded)' alts=\(resp.alternatives.count)\n".utf8))
+                    FileHandle.standardError.write(Data("[appstate] AI ok: should=\(resp.shouldExpand) conf=\(resp.confidence) expanded='\(resp.expanded)' alts=\(resp.alternatives.count)\n".utf8))
                     self.aiLastError = nil
                     if !resp.shouldExpand || resp.expanded.isEmpty {
-                        // AI declined — re-insert the period as a no-op.
                         self.interceptor.cancelExpansion()
                         self.panel.hide()
                         return
                     }
-                    self.applyExpansion(
+                    self.routeByConfidence(
                         compressed: compressed,
                         expanded: resp.expanded,
                         alternatives: resp.alternatives,
@@ -156,7 +190,6 @@ final class AppState: ObservableObject {
                 case .failure(let err):
                     FileHandle.standardError.write(Data("[appstate] AI failed: \(err.displayMessage)\n".utf8))
                     self.aiLastError = err.displayMessage
-                    // Failure — restore the user's period unchanged.
                     self.interceptor.cancelExpansion()
                     let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 60)
                     self.panel.showError(at: topLeft, message: err.displayMessage)
@@ -164,6 +197,49 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Three confidence bands:
+    ///   • ≥0.85 — auto-replace, short panel
+    ///   • 0.60–0.84 — auto-replace, longer panel, arm 1/2/3 swap + Cmd+Z undo
+    ///   • <0.60 — don't replace, restore period, show "did you mean" panel,
+    ///             arm 1/2/3 to apply a pick
+    private func routeByConfidence(compressed: String,
+                                   expanded: String,
+                                   alternatives: [String],
+                                   confidence: Double) {
+        if confidence < 0.60 {
+            // Don't touch the text. The interceptor already swallowed
+            // the "." — put it back so the user's sentence isn't damaged.
+            interceptor.cancelExpansion()
+            let pool = ([expanded] + alternatives).reduce(into: [String]()) { acc, s in
+                if !acc.contains(s) && !s.isEmpty { acc.append(s) }
+            }
+            pendingSuggestion = PendingSuggestion(compressed: compressed, candidates: pool)
+            liveExpansion = nil
+            lastAlternatives = pool
+            let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 140)
+            panel.showSuggestion(
+                at: topLeft,
+                compressed: compressed,
+                candidates: pool,
+                onPick: { [weak self] idx in
+                    Task { @MainActor in self?.applySuggestion(at: idx) }
+                },
+                onDismiss: { [weak self] in
+                    Task { @MainActor in self?.dismissSuggestion() }
+                }
+            )
+            interceptor.armAlternativeKeys(seconds: 6)
+            scheduleHide(after: 6.0)
+            return
+        }
+
+        // 0.60+ → apply.
+        applyExpansion(compressed: compressed,
+                       expanded: expanded,
+                       alternatives: alternatives,
+                       confidence: confidence)
     }
 
     private func applyExpansion(compressed: String,
@@ -176,8 +252,13 @@ final class AppState: ObservableObject {
             picked: expanded,
             alternatives: alternatives
         )
+        pendingSuggestion = nil
         lastAlternatives = alternatives
         showAlternativesPanel(confidence: confidence)
+        // Always allow Cmd+Z immediately after an expansion.
+        interceptor.armUndoKey(seconds: 6)
+        // Allow numeric swap to an alternative for the same window.
+        interceptor.armAlternativeKeys(seconds: 6)
     }
 
     private func showAlternativesPanel(confidence: Double) {
@@ -194,7 +275,6 @@ final class AppState: ObservableObject {
                 Task { @MainActor in self?.undo() }
             }
         )
-        // High confidence → hide quickly; low confidence → linger.
         let linger: TimeInterval = confidence >= 0.85 ? 2.5 : 6.0
         scheduleHide(after: linger)
     }
@@ -207,26 +287,82 @@ final class AppState: ObservableObject {
             await MainActor.run { [weak self] in
                 self?.panel.hide()
                 self?.liveExpansion = nil
+                self?.pendingSuggestion = nil
+                self?.interceptor.disarmFollowUpKeys()
             }
         }
     }
 
+    // MARK: - Armed-key callbacks (from interceptor)
+
+    private func handleArmedKey(_ key: KeystrokeInterceptor.ArmedKey) {
+        switch key {
+        case .undo:
+            undo()
+        case .escape:
+            if pendingSuggestion != nil {
+                dismissSuggestion()
+            } else {
+                panel.hide()
+                hideTask?.cancel()
+            }
+        case .alt(let i):
+            let idx = i - 1
+            if let pending = pendingSuggestion, idx >= 0, idx < pending.candidates.count {
+                applySuggestion(at: idx)
+            } else if let live = liveExpansion, idx >= 0, idx < live.alternatives.count {
+                swap(to: live.alternatives[idx])
+            }
+        }
+    }
+
+    /// Apply one of the low-confidence "did you mean…" candidates.
+    /// Text was not modified yet, so we delete 0 chars and inject the pick.
+    private func applySuggestion(at idx: Int) {
+        guard let pending = pendingSuggestion,
+              idx >= 0, idx < pending.candidates.count else { return }
+        let pick = pending.candidates[idx]
+        // The interceptor never swallowed the period in the low-confidence
+        // path (we re-inserted it via cancelExpansion). So the host buffer
+        // currently has `<compressed>.` at the cursor. Replace those.
+        interceptor.injectReplacement(
+            deletingChars: pending.compressed.count + 1,
+            with: pick + "."
+        )
+        liveExpansion = LiveExpansion(
+            compressed: pending.compressed,
+            picked: pick,
+            alternatives: pending.candidates.filter { $0 != pick }
+        )
+        pendingSuggestion = nil
+        lastCompressed = pending.compressed
+        lastExpansion = pick
+        lastAlternatives = liveExpansion?.alternatives ?? []
+        recordCorrection(compressed: pending.compressed, final: pick)
+        showAlternativesPanel(confidence: 1.0)
+        interceptor.armUndoKey(seconds: 6)
+    }
+
+    private func dismissSuggestion() {
+        pendingSuggestion = nil
+        panel.hide()
+        hideTask?.cancel()
+        interceptor.disarmFollowUpKeys()
+    }
+
     // MARK: - Swap / undo
 
-    /// Replace the currently-inserted expanded sentence with `alt`.
-    /// "Picked sentence + ." is what got injected → delete that many
-    /// characters, inject "alt + .".
     private func swap(to alt: String) {
         guard let live = liveExpansion else { return }
-        let currentLen = live.picked.count + 1 // "+1" for the period we appended
+        let currentLen = live.picked.count + 1
         interceptor.injectReplacement(deletingChars: currentLen, with: alt + ".")
         liveExpansion?.picked = alt
         lastExpansion = alt
         recordCorrection(compressed: live.compressed, final: alt)
         showAlternativesPanel(confidence: 1.0)
+        interceptor.armUndoKey(seconds: 6)
     }
 
-    /// Restore the user's original compressed token + period.
     private func undo() {
         guard let live = liveExpansion else { return }
         let currentLen = live.picked.count + 1
@@ -236,6 +372,7 @@ final class AppState: ObservableObject {
         lastCompressed = nil
         panel.hide()
         hideTask?.cancel()
+        interceptor.disarmFollowUpKeys()
     }
 
     private func recordCorrection(compressed: String, final: String) {

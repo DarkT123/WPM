@@ -94,7 +94,20 @@ final class MiniMaxClient {
     }
 
     func expand(_ req: ExpansionRequest) async -> Result<ExpansionResponse, ExpansionError> {
-        let url = config.baseURL.appendingPathComponent("/v1/chat/completions")
+        // Some providers expect the base URL to already include `/v1`
+        // (xAI, MiniMax) — in which case we just append `chat/completions`.
+        // Others expect just the host (no version path) — append the full
+        // `/v1/chat/completions`. Pick based on whether the base path
+        // already ends with `/v<digit>`.
+        let basePath = config.baseURL.path
+        let trimmed = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+        let lastSegment = trimmed.split(separator: "/").last.map(String.init) ?? ""
+        let alreadyVersioned = lastSegment.count >= 2
+            && lastSegment.first == "v"
+            && lastSegment.dropFirst().allSatisfy { $0.isNumber }
+        let url = alreadyVersioned
+            ? config.baseURL.appendingPathComponent("chat/completions")
+            : config.baseURL.appendingPathComponent("v1/chat/completions")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")

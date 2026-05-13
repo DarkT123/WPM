@@ -10,6 +10,7 @@ struct ContentView: View {
                 toggleCard
                 accessibilityCard
                 aiCard
+                safetyCard
                 styleNotesCard
                 bufferCard
                 examplesCard
@@ -123,6 +124,64 @@ struct ContentView: View {
                 }
             }
             Spacer()
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var safetyCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.title3)
+                    .foregroundStyle(.blue)
+                    .frame(width: 36)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Safety")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Lazily never expands inside Terminal, IDEs, password managers, or text that looks like a URL / file path / email / code identifier. It also doesn’t expand normal English words like “hello.” or “thanks.” — unless you turn on aggressive mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            Toggle(isOn: $state.aggressiveMode) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Aggressive mode")
+                        .font(.caption.weight(.semibold))
+                    Text("Allow expansion even when the typed token is a normal English word. Off by default.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if let skip = state.lastGateSkipReason {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Last skip: \(skip)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 2)
+            }
+
+            DisclosureGroup {
+                Text("Terminal · iTerm2 · Alacritty · Kitty · WezTerm · Hyper · VS Code · Cursor · Windsurf · Xcode · Sublime Text · JetBrains IDEs · 1Password · Bitwarden · LastPass · Dashlane · KeePassXC")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            } label: {
+                Text("Excluded apps")
+                    .font(.caption.weight(.semibold))
+            }
         }
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))

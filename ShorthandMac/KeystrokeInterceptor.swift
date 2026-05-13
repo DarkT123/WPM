@@ -50,6 +50,33 @@ final class KeystrokeInterceptor {
     /// Fired after a successful inject — for analytics / history.
     var didExpand: ((_ compressed: String, _ expanded: String) -> Void)?
 
+    /// Follow-up keys after an expansion: numeric alternative pick, Esc
+    /// to dismiss, Cmd+Z to undo. AppState arms these for a few seconds
+    /// after a successful expansion (or a low-confidence suggestion).
+    enum ArmedKey { case alt(Int), escape, undo }
+    var didPressArmedKey: ((ArmedKey) -> Void)?
+    private var altKeysDeadline: Date?
+    private var undoKeyDeadline: Date?
+
+    /// Arm 1/2/3 + Esc capture for `seconds`. While armed, those keys are
+    /// consumed (not delivered to the host app) and reported via
+    /// `didPressArmedKey`. Any non-matching keystroke disarms gracefully.
+    func armAlternativeKeys(seconds: TimeInterval = 5) {
+        altKeysDeadline = Date().addingTimeInterval(seconds)
+    }
+
+    /// Arm Cmd+Z capture for `seconds`. While armed, Cmd+Z is consumed
+    /// and reported via `didPressArmedKey(.undo)` so AppState can do its
+    /// own restore rather than letting the host's undo run.
+    func armUndoKey(seconds: TimeInterval = 5) {
+        undoKeyDeadline = Date().addingTimeInterval(seconds)
+    }
+
+    func disarmFollowUpKeys() {
+        altKeysDeadline = nil
+        undoKeyDeadline = nil
+    }
+
     init() {
         let src = CGEventSource(stateID: .privateState)
         src?.userData = 0x5348_4F52_5448
@@ -159,6 +186,16 @@ final class KeystrokeInterceptor {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
+        // Follow-up-key capture (1/2/3, Esc, Cmd+Z). These are armed by
+        // AppState for a few seconds after an expansion; we consume the
+        // matching keystroke and report it. Any non-matching key disarms
+        // gracefully and falls through to normal processing.
+        switch checkArmedKeys(keyCode: keyCode, flags: event.flags) {
+        case .consume: return nil
+        case .passThrough: return Unmanaged.passUnretained(event)
+        case .noMatch: break
+        }
+
         // Backspace: pop one, pass through.
         if keyCode == 0x33 {
             if !buffer.isEmpty {
@@ -226,6 +263,72 @@ final class KeystrokeInterceptor {
         // boundary — normal writing should never be transformed.
         clearBuffer()
         return Unmanaged.passUnretained(event)
+    }
+
+    private enum ArmedResult { case consume, passThrough, noMatch }
+
+    private func checkArmedKeys(keyCode: Int64, flags: CGEventFlags) -> ArmedResult {
+        let now = Date()
+        let undoArmed = (undoKeyDeadline.map { now < $0 } ?? false)
+        let altsArmed = (altKeysDeadline.map { now < $0 } ?? false)
+        if !undoArmed { undoKeyDeadline = nil }
+        if !altsArmed { altKeysDeadline = nil }
+        if !undoArmed && !altsArmed { return .noMatch }
+
+        let hasCmd = !flags.intersection(.maskCommand).isEmpty
+        let hasOther = !flags.intersection([.maskControl, .maskAlternate]).isEmpty
+
+        // Cmd+Z → undo (only).
+        if undoArmed, hasCmd, !hasOther, keyCode == 0x06 {
+            undoKeyDeadline = nil
+            altKeysDeadline = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.didPressArmedKey?(.undo)
+            }
+            return .consume
+        }
+
+        // Plain 1 / 2 / 3 → alternative pick.
+        if altsArmed, !hasCmd, !hasOther {
+            let idx: Int? = {
+                switch keyCode {
+                case 0x12: return 1
+                case 0x13: return 2
+                case 0x14: return 3
+                default: return nil
+                }
+            }()
+            if let idx {
+                altKeysDeadline = nil
+                undoKeyDeadline = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.didPressArmedKey?(.alt(idx))
+                }
+                return .consume
+            }
+        }
+
+        // Esc → dismiss.
+        if altsArmed, keyCode == 0x35 {
+            altKeysDeadline = nil
+            undoKeyDeadline = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.didPressArmedKey?(.escape)
+            }
+            return .consume
+        }
+
+        // A modifier-bearing keystroke that isn't our Cmd+Z — disarm undo
+        // (user is doing something else). Don't disarm alts.
+        if hasCmd || hasOther {
+            undoKeyDeadline = nil
+            return .noMatch
+        }
+
+        // Plain key that isn't 1/2/3/Esc — disarm alts (user is moving
+        // on) but keep undo armed; Cmd+Z is still meaningful.
+        altKeysDeadline = nil
+        return .noMatch
     }
 
     private func clearBuffer() {

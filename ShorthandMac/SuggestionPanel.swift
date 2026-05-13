@@ -76,6 +76,32 @@ final class SuggestionPanel {
         }
     }
 
+    /// Low-confidence: AI returned a guess but Lazily didn't touch the
+    /// user's text. Panel offers "Did you mean…" with up-to-3 picks.
+    /// Pressing 1/2/3 applies the corresponding pick; clicking does too.
+    func showSuggestion(at topLeft: NSPoint,
+                        compressed: String,
+                        candidates: [String],
+                        onPick: @escaping (Int) -> Void,
+                        onDismiss: @escaping () -> Void) {
+        host.rootView = PanelRoot(state: .suggesting(
+            compressed: compressed,
+            candidates: Array(candidates.prefix(3)),
+            onPick: onPick,
+            onDismiss: onDismiss
+        ))
+        let rowCount = min(3, candidates.count)
+        let h: CGFloat = CGFloat(rowCount) * 28 + 56
+        let size = NSSize(width: 380, height: h)
+        panel.setContentSize(size)
+        panel.setFrameTopLeftPoint(topLeft)
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            panel.animator().alphaValue = 1
+        }
+    }
+
     func showError(at topLeft: NSPoint, message: String) {
         host.rootView = PanelRoot(state: .error(message: message))
         let size = NSSize(width: 380, height: 56)
@@ -103,6 +129,10 @@ private enum PanelState {
                   alternatives: [String],
                   onSwap: (String) -> Void,
                   onUndo: () -> Void)
+    case suggesting(compressed: String,
+                    candidates: [String],
+                    onPick: (Int) -> Void,
+                    onDismiss: () -> Void)
     case error(message: String)
 }
 
@@ -118,6 +148,8 @@ private struct PanelRoot: View {
                 ExpandingView(compressed: compressed)
             case .expanded(let picked, let alts, let onSwap, let onUndo):
                 ExpandedView(picked: picked, alternatives: alts, onSwap: onSwap, onUndo: onUndo)
+            case .suggesting(let compressed, let candidates, let onPick, let onDismiss):
+                SuggestingView(compressed: compressed, candidates: candidates, onPick: onPick, onDismiss: onDismiss)
             case .error(let message):
                 ErrorView(message: message)
             }
@@ -213,6 +245,40 @@ private struct AlternativeRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SuggestingView: View {
+    let compressed: String
+    let candidates: [String]
+    let onPick: (Int) -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.circle")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                Text("Did you mean")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(compressed)
+                    .font(.system(.caption, design: .monospaced))
+                Spacer(minLength: 0)
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+            ForEach(Array(candidates.prefix(3).enumerated()), id: \.offset) { idx, c in
+                AlternativeRow(index: idx + 1, sentence: c) {
+                    onPick(idx)
+                }
+            }
+        }
     }
 }
 
