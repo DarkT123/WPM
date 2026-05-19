@@ -56,5 +56,6 @@ edgetype/backend/data/phrases.json
 coverage/
 *.lcov
 
-# Compiled eval runner — built by `swiftc eval/runner.swift ...`
+# Compiled eval binaries — built by swiftc
 eval/runner
+eval/local_test

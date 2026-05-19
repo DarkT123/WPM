@@ -163,6 +163,24 @@ final class AppState: ObservableObject {
         }
         self.lastGateSkipReason = nil
 
+        // LOCAL-FIRST PATH. If the input segments cleanly into known
+        // English words / contractions / known shorthand, we have a
+        // microseconds-fast answer with no API cost. Only fall through
+        // to the LLM when local confidence is below threshold.
+        let local = LocalPipeline.run(compressed)
+        FileHandle.standardError.write(Data("[appstate] local: '\(local.expandedSentence)' conf=\(local.confidence) segs=\(local.segments) unknown=\(local.unknownCount) lat=\(String(format: "%.1f", local.latencyMs))ms\n".utf8))
+        if local.confidence >= 0.85, !local.expandedSentence.isEmpty {
+            applyLocalExpansion(
+                compressed: compressed,
+                expanded: local.expandedSentence,
+                segments: local.segments,
+                contextBefore: context.before,
+                contextAfter: context.after,
+                appName: appName
+            )
+            return
+        }
+
         guard let ai else {
             aiLastError = "no API key configured — set MINIMAX_API_KEY in .env"
             interceptor.cancelExpansion()
@@ -279,6 +297,38 @@ final class AppState: ObservableObject {
                        expanded: expanded,
                        alternatives: alternatives,
                        confidence: confidence)
+    }
+
+    /// Fast path: local pipeline produced a high-confidence answer.
+    /// Inject, persist a CorrectionRecord with `appName` annotated as
+    /// "local", and arm Cmd+Z so the user can still bail if we got it
+    /// wrong.
+    private func applyLocalExpansion(compressed: String,
+                                     expanded: String,
+                                     segments: [String],
+                                     contextBefore: String,
+                                     contextAfter: String,
+                                     appName: String?) {
+        interceptor.applyExpansion(compressed: compressed, expanded: expanded)
+        liveExpansion = LiveExpansion(
+            compressed: compressed,
+            picked: expanded,
+            alternatives: []
+        )
+        pendingSuggestion = nil
+        lastAlternatives = []
+        let pending = PendingRecord(
+            compressed: compressed,
+            generated: expanded,
+            confidence: 0.95,
+            alternatives: [],
+            contextBefore: contextBefore,
+            contextAfter: contextAfter,
+            appName: appName.map { "\($0) (local)" } ?? "local"
+        )
+        pendingRecord = pending
+        showAlternativesPanel(confidence: 0.95)
+        interceptor.armUndoKey(seconds: 6)
     }
 
     private func applyExpansion(compressed: String,
