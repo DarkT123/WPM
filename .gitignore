@@ -55,3 +55,7 @@ edgetype/backend/data/phrases.json
 # Coverage / test artifacts
 coverage/
 *.lcov
+
+# Compiled eval binaries — built by swiftc
+eval/runner
+eval/local_test

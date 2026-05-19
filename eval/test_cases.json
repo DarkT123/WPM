@@ -1,0 +1,739 @@
+{
+  "version": 1,
+  "comment": "Each case: gate-then-AI. `expect.gate` is whether ExpansionGate should let it through. For cases where the gate proceeds, `expect.should_expand` and `expect.acceptable_outputs` define a correct AI response (case-insensitive substring or letter-coverage match).",
+  "cases": [
+    {
+      "id": "expand-001",
+      "compressed_input": "tdrh",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["the dog ran home"]}
+    },
+    {
+      "id": "expand-002",
+      "compressed_input": "thdorah",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["the dog ran home"]}
+    },
+    {
+      "id": "expand-003",
+      "compressed_input": "tdranhome",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["the dog ran home"]}
+    },
+    {
+      "id": "expand-004",
+      "compressed_input": "thedogranhome",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["the dog ran home"]}
+    },
+    {
+      "id": "expand-005",
+      "compressed_input": "iwgotosch",
+      "context_before": "Yesterday my teacher asked where I was going. ",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i want to go to school", "i will go to school", "i went to school"]}
+    },
+    {
+      "id": "expand-006",
+      "compressed_input": "iwantgotoschool",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i want to go to school"]}
+    },
+    {
+      "id": "expand-007",
+      "compressed_input": "iwtm",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i want to make", "i would totally make"]}
+    },
+    {
+      "id": "expand-008",
+      "compressed_input": "tqbfjotld",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["the quick brown fox jumps over the lazy dog"]}
+    },
+    {
+      "id": "expand-009",
+      "compressed_input": "hwryt",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["how are you today", "how was your trip"]}
+    },
+    {
+      "id": "expand-010",
+      "compressed_input": "iltyalot",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i love you a lot", "i like to yell a lot"]}
+    },
+    {
+      "id": "expand-011",
+      "compressed_input": "letsgototheparkthen",
+      "context_before": "Are you free at 5? ",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let's go to the park then"]}
+    },
+    {
+      "id": "expand-012",
+      "compressed_input": "imrunninglate",
+      "context_before": "Hi, ",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm running late", "im running late"]}
+    },
+    {
+      "id": "expand-013",
+      "compressed_input": "thanksforhelp",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["thanks for the help", "thanks for your help"]}
+    },
+    {
+      "id": "expand-014",
+      "compressed_input": "ineedtocallmom",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i need to call mom"]}
+    },
+    {
+      "id": "expand-015",
+      "compressed_input": "wherearewegoing",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["where are we going"]}
+    },
+    {
+      "id": "expand-016",
+      "compressed_input": "canugiveridhme",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["can you give a ride home", "can you give us a ride home to me"]}
+    },
+    {
+      "id": "expand-017",
+      "compressed_input": "letmenowhenfre",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let me know when free", "let me know when you are free"]}
+    },
+    {
+      "id": "expand-018",
+      "compressed_input": "ilbthrin5",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'll be there in 5", "ill be there in 5"]}
+    },
+    {
+      "id": "expand-019",
+      "compressed_input": "callmeback",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["call me back"]}
+    },
+    {
+      "id": "expand-020",
+      "compressed_input": "ihavetodogo",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i have to go"]}
+    },
+    {
+      "id": "expand-021",
+      "compressed_input": "wllbsoonin",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true}
+    },
+    {
+      "id": "expand-022",
+      "compressed_input": "didyoueatyet",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["did you eat yet"]}
+    },
+    {
+      "id": "expand-023",
+      "compressed_input": "wheresmyphone",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["where's my phone", "wheres my phone", "where is my phone"]}
+    },
+    {
+      "id": "expand-024",
+      "compressed_input": "imnothungry",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm not hungry", "im not hungry"]}
+    },
+    {
+      "id": "expand-025",
+      "compressed_input": "wkupatsixam",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["wake up at six am", "woke up at six am"]}
+    },
+    {
+      "id": "expand-026",
+      "compressed_input": "iwsthinkingweshould",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i was thinking we should"]}
+    },
+    {
+      "id": "expand-027",
+      "compressed_input": "thxalot",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["thanks a lot", "thank you a lot"]}
+    },
+    {
+      "id": "expand-028",
+      "compressed_input": "couldwemoveitto3",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["could we move it to 3"]}
+    },
+    {
+      "id": "expand-029",
+      "compressed_input": "letsmeetattheusual",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let's meet at the usual"]}
+    },
+    {
+      "id": "expand-030",
+      "compressed_input": "happybday",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["happy birthday", "happy bday"]}
+    },
+    {
+      "id": "expand-031",
+      "compressed_input": "seeulater",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["see you later"]}
+    },
+    {
+      "id": "expand-032",
+      "compressed_input": "imatthestation",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm at the station", "im at the station"]}
+    },
+    {
+      "id": "expand-033",
+      "compressed_input": "btwiwfb",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true}
+    },
+    {
+      "id": "expand-034",
+      "compressed_input": "lmkwhenuhome",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let me know when you are home", "let me know when u home"]}
+    },
+    {
+      "id": "expand-035",
+      "compressed_input": "thxbye",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["thanks bye", "thank you bye", "thanks goodbye"]}
+    },
+    {
+      "id": "expand-036",
+      "compressed_input": "letmecheck",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let me check"]}
+    },
+    {
+      "id": "expand-037",
+      "compressed_input": "whatswrong",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["what's wrong", "whats wrong"]}
+    },
+    {
+      "id": "expand-038",
+      "compressed_input": "areyousure",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["are you sure"]}
+    },
+    {
+      "id": "expand-039",
+      "compressed_input": "thatsthebest",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["that's the best", "thats the best"]}
+    },
+    {
+      "id": "expand-040",
+      "compressed_input": "imsorry",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm sorry", "im sorry"]}
+    },
+
+    {
+      "id": "no-expand-word-001",
+      "compressed_input": "hello",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "english word"}
+    },
+    {
+      "id": "no-expand-word-002",
+      "compressed_input": "thanks",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "english word"}
+    },
+    {
+      "id": "no-expand-word-003",
+      "compressed_input": "okay",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "english word"}
+    },
+    {
+      "id": "no-expand-word-004",
+      "compressed_input": "yes",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-005",
+      "compressed_input": "no",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-006",
+      "compressed_input": "google",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-007",
+      "compressed_input": "readme",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-008",
+      "compressed_input": "hi",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-009",
+      "compressed_input": "uh",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-010",
+      "compressed_input": "hmm",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-011",
+      "compressed_input": "sure",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-012",
+      "compressed_input": "great",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-013",
+      "compressed_input": "fine",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-014",
+      "compressed_input": "today",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-015",
+      "compressed_input": "later",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-016",
+      "compressed_input": "perfect",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-017",
+      "compressed_input": "right",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-018",
+      "compressed_input": "amazing",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-019",
+      "compressed_input": "interesting",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-word-020",
+      "compressed_input": "good",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+
+    {
+      "id": "no-expand-url-001",
+      "compressed_input": "com",
+      "context_before": "Check out https://google.",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "url"}
+    },
+    {
+      "id": "no-expand-url-002",
+      "compressed_input": "git",
+      "context_before": "Clone https://github.com/foo/bar.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-url-003",
+      "compressed_input": "html",
+      "context_before": "open index.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-url-004",
+      "compressed_input": "md",
+      "context_before": "open README.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-url-005",
+      "compressed_input": "swift",
+      "context_before": "AppState.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-path-001",
+      "compressed_input": "txt",
+      "context_before": "/Users/andy/notes.",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "path"}
+    },
+    {
+      "id": "no-expand-path-002",
+      "compressed_input": "json",
+      "context_before": "./config/settings.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-path-003",
+      "compressed_input": "py",
+      "context_before": "src/utils/helpers.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-email-001",
+      "compressed_input": "com",
+      "context_before": "Send to alice@example.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-email-002",
+      "compressed_input": "org",
+      "context_before": "Reach me at me@hello.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-code-001",
+      "compressed_input": "filter",
+      "context_before": "let result = items.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-code-002",
+      "compressed_input": "length",
+      "context_before": "if buffer.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-code-003",
+      "compressed_input": "swift",
+      "context_before": "import SwiftUI\nimport Foundation\n\nstruct Foo {} // some.",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-identifier-001",
+      "compressed_input": "name",
+      "context_before": "user_",
+      "context_after": "",
+      "expect": {"gate": "skip", "reason_contains": "identifier"}
+    },
+    {
+      "id": "no-expand-identifier-002",
+      "compressed_input": "case",
+      "context_before": "switch-",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-001",
+      "compressed_input": "ls",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-002",
+      "compressed_input": "pwd",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-003",
+      "compressed_input": "cd",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-004",
+      "compressed_input": "git",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-005",
+      "compressed_input": "npm",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-006",
+      "compressed_input": "vim",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-shell-007",
+      "compressed_input": "make",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+
+    {
+      "id": "no-expand-app-001",
+      "compressed_input": "iwgotosch",
+      "context_before": "",
+      "context_after": "",
+      "focused_bundle_id": "com.apple.Terminal",
+      "expect": {"gate": "skip", "reason_contains": "com.apple.terminal"}
+    },
+    {
+      "id": "no-expand-app-002",
+      "compressed_input": "tdrh",
+      "context_before": "",
+      "context_after": "",
+      "focused_bundle_id": "com.microsoft.VSCode",
+      "expect": {"gate": "skip", "reason_contains": "vscode"}
+    },
+    {
+      "id": "no-expand-app-003",
+      "compressed_input": "iwantgotoschool",
+      "context_before": "",
+      "context_after": "",
+      "focused_bundle_id": "com.apple.dt.Xcode",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-app-004",
+      "compressed_input": "thanksforhelp",
+      "context_before": "",
+      "context_after": "",
+      "focused_bundle_id": "com.googlecode.iterm2",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "no-expand-app-005",
+      "compressed_input": "letsgototheparkthen",
+      "context_before": "",
+      "context_after": "",
+      "focused_bundle_id": "com.1password.1password",
+      "expect": {"gate": "skip"}
+    },
+
+    {
+      "id": "aggressive-001",
+      "compressed_input": "hello",
+      "context_before": "",
+      "context_after": "",
+      "aggressive": true,
+      "expect": {"gate": "proceed"}
+    },
+    {
+      "id": "aggressive-002",
+      "compressed_input": "thanks",
+      "context_before": "",
+      "context_after": "",
+      "aggressive": true,
+      "expect": {"gate": "proceed"}
+    },
+
+    {
+      "id": "boundary-001",
+      "compressed_input": "tdrhgoogle",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true}
+    },
+    {
+      "id": "boundary-002",
+      "compressed_input": "letmegoogleit",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let me google it"]}
+    },
+    {
+      "id": "boundary-003",
+      "compressed_input": "ab",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "boundary-004",
+      "compressed_input": "iiiii",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed"}
+    },
+    {
+      "id": "expand-041",
+      "compressed_input": "imintheoffice",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm in the office", "im in the office"]}
+    },
+    {
+      "id": "expand-042",
+      "compressed_input": "wedontneedthat",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["we don't need that", "we dont need that"]}
+    },
+    {
+      "id": "expand-043",
+      "compressed_input": "letmesleepalittle",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["let me sleep a little"]}
+    },
+    {
+      "id": "expand-044",
+      "compressed_input": "donutsformeetingplz",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["donuts for meeting please", "donuts for the meeting please"]}
+    },
+    {
+      "id": "expand-045",
+      "compressed_input": "whatdoyoumean",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["what do you mean"]}
+    },
+    {
+      "id": "expand-046",
+      "compressed_input": "imnotsureyet",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["i'm not sure yet", "im not sure yet"]}
+    },
+    {
+      "id": "expand-047",
+      "compressed_input": "callbacklatr",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["call back later"]}
+    },
+    {
+      "id": "boundary-005",
+      "compressed_input": "okayletsgo",
+      "context_before": "",
+      "context_after": "",
+      "expect": {"gate": "proceed", "should_expand": true, "acceptable_outputs": ["okay let's go", "okay lets go"]}
+    },
+    {
+      "id": "boundary-006",
+      "compressed_input": "good",
+      "context_before": "Sounds ",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    },
+    {
+      "id": "boundary-007",
+      "compressed_input": "very",
+      "context_before": "That's ",
+      "context_after": "",
+      "expect": {"gate": "skip"}
+    }
+  ]
+}

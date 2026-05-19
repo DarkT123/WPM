@@ -48,11 +48,21 @@ enum CaretLocator {
             // of the primary screen; AppKit windows use bottom-left.
             let screenHeight = screen.frame.height
             let topLeftY = screenHeight - rect.maxY - 6
-            return NSPoint(x: rect.minX, y: topLeftY)
+            // Clamp to screen so an off-screen caret rect doesn't push
+            // the panel out of view.
+            let clampedX = max(20, min(rect.minX, screen.frame.maxX - 380))
+            let clampedY = max(panelHeight + 20, min(topLeftY, screen.frame.maxY - 20))
+            return NSPoint(x: clampedX, y: clampedY)
         }
-        // Fallback: anchor near the mouse cursor.
-        let mouse = NSEvent.mouseLocation
-        return NSPoint(x: mouse.x + 12, y: mouse.y - 12)
+        // Fallback when AX can't locate the caret (Electron apps, Terminal,
+        // VS Code, etc.). Use a known-good position near the top of the
+        // primary screen so the panel is always visible.
+        if let screen = NSScreen.main {
+            let topY = screen.frame.maxY - 60
+            let centerX = screen.frame.midX - 180
+            return NSPoint(x: centerX, y: topY)
+        }
+        return NSPoint(x: 100, y: 800)
     }
 
     /// Returns (before, after) text around the caret in the focused field,

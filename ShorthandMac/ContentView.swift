@@ -9,24 +9,22 @@ struct ContentView: View {
                 header
                 toggleCard
                 accessibilityCard
-                encodingCard
                 aiCard
+                safetyCard
                 styleNotesCard
                 bufferCard
                 examplesCard
             }
             .padding(20)
         }
-        .frame(minWidth: 460, minHeight: 640)
+        .frame(minWidth: 480, minHeight: 640)
     }
-
-    // MARK: - Pieces
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Shorthand")
+            Text("Lazily")
                 .font(.title.weight(.semibold))
-            Text("Type the first letter of each word with no spaces. A floating panel by your cursor shows 3 suggestions — click 1/2/3 to pick, or just type “.” to auto-apply #1.")
+            Text("Type a compressed sentence with no spaces. Use as many letters per word as you want. Press “.” to expand it into a clean full sentence. Normal writing with spaces is never touched.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -71,7 +69,7 @@ struct ContentView: View {
                 Text(granted ? "Accessibility granted" : "Accessibility required")
                     .font(.subheadline.weight(.semibold))
                 Text(granted
-                     ? "Shorthand can read and rewrite keystrokes in any app."
+                     ? "Lazily can read and rewrite keystrokes in any app."
                      : "Open System Settings → Privacy & Security → Accessibility, enable this app, then toggle Active.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -90,32 +88,6 @@ struct ContentView: View {
         .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private var encodingCard: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "keyboard.badge.ellipsis")
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 36)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Shorthand encoding")
-                    .font(.subheadline.weight(.semibold))
-                Text("How many letters you type per word. 2-letter is ~5× more accurate; 1-letter is fewer keystrokes but very ambiguous.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Picker("", selection: $state.prefixLength) {
-                    Text("1-letter (tdrh)").tag(1)
-                    Text("2-letter (thdoraho)").tag(2)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-    }
-
     private var aiCard: some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: state.aiEnabled ? "sparkles" : "sparkles.slash")
@@ -124,20 +96,92 @@ struct ContentView: View {
                 .frame(width: 36)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(state.aiEnabled ? "MiniMax AI enabled" : "MiniMax AI disabled")
+                    Text(state.aiEnabled ? "AI expansion enabled" : "AI expansion disabled")
                         .font(.subheadline.weight(.semibold))
                     if state.aiInFlight {
                         ProgressView().controlSize(.small).scaleEffect(0.6)
+                        Text("expanding…").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
                 Text(state.aiEnabled
-                     ? "Local suggestions appear instantly; AI reranks them after ~250 ms of typing pause with proper capitalization, grammar, and context awareness."
+                     ? "When you press “.” on a compressed shorthand token, the AI infers word boundaries, missing connectors, capitalization and grammar — using up to 500 characters around your cursor as context."
                      : "Add MINIMAX_API_KEY to /Users/andyzhao/Translating\u{00A0}keyboard/.env, then quit and relaunch.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let err = state.aiLastError {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                        Text("Last AI call: \(err)")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.top, 4)
+                }
             }
             Spacer()
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var safetyCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.title3)
+                    .foregroundStyle(.blue)
+                    .frame(width: 36)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Safety")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Lazily never expands inside Terminal, IDEs, password managers, or text that looks like a URL / file path / email / code identifier. It also doesn’t expand normal English words like “hello.” or “thanks.” — unless you turn on aggressive mode.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            Toggle(isOn: $state.aggressiveMode) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Aggressive mode")
+                        .font(.caption.weight(.semibold))
+                    Text("Allow expansion even when the typed token is a normal English word. Off by default.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if let skip = state.lastGateSkipReason {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Last skip: \(skip)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 2)
+            }
+
+            DisclosureGroup {
+                Text("Terminal · iTerm2 · Alacritty · Kitty · WezTerm · Hyper · VS Code · Cursor · Windsurf · Xcode · Sublime Text · JetBrains IDEs · 1Password · Bitwarden · LastPass · Dashlane · KeePassXC")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            } label: {
+                Text("Excluded apps")
+                    .font(.caption.weight(.semibold))
+            }
         }
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -147,7 +191,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Style notes (fed to the AI as system prompt)")
                 .font(.subheadline.weight(.semibold))
-            Text("Example: \"casual tone, lowercase except proper nouns, use Oxford comma\".")
+            Text("Example: “casual tone, lowercase except proper nouns, student writing — don’t make it overly formal”.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextEditor(text: $state.styleNotes)
@@ -173,19 +217,30 @@ struct ContentView: View {
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(state.bufferDisplay.isEmpty ? .secondary : .primary)
                 Spacer(minLength: 0)
+                if state.aiInFlight {
+                    ProgressView().controlSize(.small).scaleEffect(0.55)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(Color(NSColor.textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
 
-            if let s = state.lastShorthand, let e = state.lastExpansion {
-                HStack(spacing: 8) {
-                    Image(systemName: "wand.and.stars").font(.caption2).foregroundStyle(.green)
-                    Text(s)
-                        .font(.system(.caption, design: .monospaced))
-                    Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
-                    Text(e).font(.caption)
-                    Spacer(minLength: 0)
+            if let compressed = state.lastCompressed, let expanded = state.lastExpansion {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "wand.and.stars").font(.caption2).foregroundStyle(.green)
+                        Text(compressed)
+                            .font(.system(.caption, design: .monospaced))
+                        Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                        Text(expanded).font(.caption)
+                        Spacer(minLength: 0)
+                    }
+                    if !state.lastAlternatives.isEmpty {
+                        Text("Alternatives: " + state.lastAlternatives.joined(separator: " • "))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -200,17 +255,16 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Try these in any app")
                 .font(.subheadline.weight(.semibold))
-            if state.prefixLength == 2 {
-                ExampleRow(input: "thdoraho.", output: "the dog ran home.")
-                ExampleRow(input: "iwatoma.", output: "i want to make.")
-            } else {
-                ExampleRow(input: "tdrh.", output: "the dog ran home.")
-                ExampleRow(input: "iwtm.", output: "i want to make.")
-            }
-            Text("As you type, the floating panel shows 3 AI candidates. Click 1, 2, or 3 to pick — or hit “.” to auto-apply #1 + a period.")
+            ExampleRow(input: "tdrh.", output: "the dog ran home.")
+            ExampleRow(input: "thdorah.", output: "the dog ran home.")
+            ExampleRow(input: "tdranhome.", output: "the dog ran home.")
+            ExampleRow(input: "iwgotosch.", output: "I want to go to school.")
+            ExampleRow(input: "thedogranhome.", output: "the dog ran home.")
+            Text("Mix as much or as little detail as you want — more letters = more accurate expansion. Press “.” to expand. Normal sentences with spaces stay untouched.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
