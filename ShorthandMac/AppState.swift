@@ -142,6 +142,14 @@ final class AppState: ObservableObject {
         generation &+= 1
         let myGen = generation
         hideTask?.cancel()
+        // Clear any stale "Expanding…" UI from a prior request whose AI
+        // call may still be in flight. If we don't, a gate-skip on this
+        // new request would leave the old panel showing forever once
+        // the stale result lands and gets dropped by the generation guard.
+        if aiInFlight {
+            aiInFlight = false
+            panel.hide()
+        }
 
         let context = CaretLocator.contextAroundCaret(maxChars: 500)
         let frontApp = NSWorkspace.shared.frontmostApplication
@@ -190,6 +198,10 @@ final class AppState: ObservableObject {
         let topLeft = CaretLocator.panelTopLeftBelowCaret(panelHeight: 140)
         aiInFlight = true
         panel.showExpanding(at: topLeft, compressed: compressed)
+        // Hard deadline: if the AI request hangs or its result is
+        // dropped due to a newer generation, force-hide the panel after
+        // a generous window so we never have stale "Expanding…" UI.
+        scheduleHide(after: 12.0)
 
         let relevantCorrections = corrections.relevant(forCompressed: compressed, appName: appName, limit: 5)
 

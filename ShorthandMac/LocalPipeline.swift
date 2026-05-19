@@ -96,10 +96,17 @@ enum LocalPipeline {
         // 2. Segment.
         let seg = WordSegmenter.segment(normalized)
 
-        // 3. Token-level shorthand expansion. A single token may map to
+        // 3. Spell-correct unknown tokens via edit-distance-1. Only
+        // tokens ≥4 chars are touched — short tokens are more likely
+        // shorthand than typos.
+        let corrected = seg.segments.map { tok -> String in
+            SpellCorrector.correct(tok) ?? tok
+        }
+
+        // 4. Token-level shorthand expansion. A single token may map to
         // a multi-word phrase; we split on space so the polisher sees
         // discrete words.
-        let expanded: [String] = seg.segments.flatMap { token -> [String] in
+        let expanded: [String] = corrected.flatMap { token -> [String] in
             if let phrase = tokenExpansions[token] {
                 return phrase.split(separator: " ").map(String.init)
             }
@@ -109,18 +116,18 @@ enum LocalPipeline {
         // 4. Grammar polish.
         let polished = GrammarPolisher.polish(expanded, originalInput: rawInput)
 
-        // 5. Confidence — ratio of segmented tokens that are known
-        // dictionary words, with two penalties:
+        // 6. Confidence — ratio of POST-correction tokens that are
+        // known dictionary words, with two penalties:
         //   • short inputs (1-2 segments) get less confidence
         //   • bare single-letter segments (other than "i" / "a") signal
         //     that the segmenter ran out of real words to pick from —
         //     in that case we'd rather fall through to the LLM than
         //     emit nonsense
-        let known = seg.segments.filter { LocalDictionary.contains($0) }.count
-        let total = max(1, seg.segments.count)
+        let known = corrected.filter { LocalDictionary.contains($0) }.count
+        let total = max(1, corrected.count)
         let knownRatio = Double(known) / Double(total)
         let lengthFactor: Double = total >= 3 ? 1.0 : (total == 2 ? 0.85 : 0.5)
-        let bareSingleLetters = seg.segments.filter {
+        let bareSingleLetters = corrected.filter {
             $0.count == 1 && $0 != "i" && $0 != "a"
         }.count
         let singleLetterPenalty: Double = bareSingleLetters > 0 ? 0.5 : 1.0

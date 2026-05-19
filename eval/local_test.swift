@@ -13,6 +13,12 @@ enum LocalTest {
             ("happybday",                 "Happy birthday"),
             ("brbgrabbingcoffee",         "Be right back grabbing coffee"),
             ("idkwhattodo",               "I don't know what to do"),
+            // Spelling-correction cases:
+            ("ithinkithinktehdog",        "I think i think the dog"),     // teh → the
+            ("missspelling",              "Misspelling"),                  // miss → miss
+            ("recievedthemessage",        "Received the message"),         // recieve → receive
+            ("seperatethewords",          "Separate the words"),           // seperate → separate
+            ("hellotehre",                "Hello there"),                  // tehre → there
             ("canyoupickupgrocerieswhenuhome", "Can you pick up groceries when you home"),
             // Cases the local pipeline should NOT handle confidently (expect low conf):
             ("tdrh",                      "—  (single-letter shorthand; needs AI)"),

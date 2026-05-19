@@ -86,13 +86,24 @@ final class MiniMaxClient {
     private let config: Config
     private let session: URLSession
 
+    /// Tiny LRU cache of recent expansions. Keyed on the compressed
+    /// input + the tail of the context (since long shared context
+    /// changes between requests but tail-tokens are usually stable for
+    /// repeat shorthand). Trims to ~50 entries with 5-minute TTL.
+    private let cache = ExpansionCache(capacity: 50, ttl: 300)
+
     init(config: Config) {
         self.config = config
-        let cfg = URLSessionConfiguration.ephemeral
+        // Use the default (non-ephemeral) configuration so URLSession
+        // reuses the TLS connection across requests — saves ~150 ms per
+        // call after the first.
+        let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = config.timeout
         cfg.timeoutIntervalForResource = config.timeout * 2
         cfg.urlCache = nil
         cfg.waitsForConnectivity = false
+        cfg.httpShouldUsePipelining = true
+        cfg.httpMaximumConnectionsPerHost = 4
         self.session = URLSession(configuration: cfg)
     }
 
@@ -102,6 +113,12 @@ final class MiniMaxClient {
     }
 
     func expand(_ req: ExpansionRequest) async -> Result<ExpansionResponse, ExpansionError> {
+        // Hot cache: repeat shorthand in the same context returns
+        // instantly. The cache key only uses a short context tail so
+        // typing the same shorthand in a new paragraph still hits.
+        if let cached = cache.get(req) {
+            return .success(cached)
+        }
         // Some providers expect the base URL to already include `/v1`
         // (xAI, MiniMax) — in which case we just append `chat/completions`.
         // Others expect just the host (no version path) — append the full
@@ -124,7 +141,10 @@ final class MiniMaxClient {
         let body: [String: Any] = [
             "model": config.model,
             "temperature": 0,
-            "max_tokens": 3000,
+            // 800 is enough for 3 candidate sentences in the nested JSON
+            // schema. Reasoning models still get a generous budget for
+            // their hidden chain-of-thought via separate reasoning tokens.
+            "max_tokens": 800,
             "messages": [
                 ["role": "system", "content": Self.systemPrompt(styleNotes: req.styleNotes)],
                 ["role": "user", "content": Self.userPrompt(req: req)],
@@ -145,6 +165,7 @@ final class MiniMaxClient {
                 return .failure(.http(http.statusCode, msg))
             }
             if let parsed = Self.parse(data) {
+                cache.set(req, response: parsed)
                 return .success(parsed)
             }
             return .failure(.parse("no expansion in response (model may have hit max_tokens during reasoning)"))
@@ -154,6 +175,61 @@ final class MiniMaxClient {
             return .failure(.network(err.localizedDescription))
         } catch {
             return .failure(.network(error.localizedDescription))
+        }
+    }
+
+    /// Bounded, TTL'd in-memory cache of expansion responses. Thread-safe
+    /// via a serial lock — calls happen off the main actor.
+    final class ExpansionCache {
+        struct Entry {
+            let response: ExpansionResponse
+            let cachedAt: Date
+        }
+        private let capacity: Int
+        private let ttl: TimeInterval
+        private var store: [String: Entry] = [:]
+        private var order: [String] = []   // LRU order, oldest first
+        private let lock = NSLock()
+
+        init(capacity: Int, ttl: TimeInterval) {
+            self.capacity = capacity
+            self.ttl = ttl
+        }
+
+        private static func key(_ req: ExpansionRequest) -> String {
+            // Tail-only context so the same shorthand in different
+            // paragraphs of the same document still hits. App name is
+            // included because the same compressed token may expand
+            // differently in Slack vs. Notes.
+            let beforeTail = String(req.contextBefore.suffix(60))
+            return "\(req.compressedInput)|\(req.appName ?? "")|\(beforeTail)"
+        }
+
+        func get(_ req: ExpansionRequest) -> ExpansionResponse? {
+            let k = Self.key(req)
+            lock.lock(); defer { lock.unlock() }
+            guard let entry = store[k] else { return nil }
+            if Date().timeIntervalSince(entry.cachedAt) > ttl {
+                store.removeValue(forKey: k)
+                if let idx = order.firstIndex(of: k) { order.remove(at: idx) }
+                return nil
+            }
+            // Move-to-end on hit.
+            if let idx = order.firstIndex(of: k) { order.remove(at: idx) }
+            order.append(k)
+            return entry.response
+        }
+
+        func set(_ req: ExpansionRequest, response: ExpansionResponse) {
+            let k = Self.key(req)
+            lock.lock(); defer { lock.unlock() }
+            store[k] = Entry(response: response, cachedAt: Date())
+            if let idx = order.firstIndex(of: k) { order.remove(at: idx) }
+            order.append(k)
+            while order.count > capacity {
+                let evict = order.removeFirst()
+                store.removeValue(forKey: evict)
+            }
         }
     }
 
